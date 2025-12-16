@@ -71,9 +71,11 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # ACTION SPACE
         # Action: Continuous pressure value between 0 and Max Pressure
+        # The agent will output values between -1 and 1.
+        # Scale this to 0 - 100,000 Pa later.
         self.action_space = spaces.Box(
-            low=np.array([0.0]), 
-            high=np.array([self.max_pressure]), 
+            low=np.array([-1.0]), #low=np.array([0.0]), 
+            high=np.array([1.0]), #high=np.array([self.max_pressure]),
             shape=(1,), # we control 1 variable (Pressure)
             dtype=np.float32
         )
@@ -90,7 +92,9 @@ class AnsysSoftActuatorEnv(gym.Env):
 
     def step(self, action):
         # Unpack Action and clip it to ensure it stays within bounds
-        pressure_val = np.clip(action[0], 0, self.max_pressure)
+        #pressure_val = np.clip(action[0], 0, self.max_pressure)
+        raw_action = np.clip(action[0], -1.0, 1.0)
+        pressure_val = ((raw_action + 1.0) / 2.0) * self.max_pressure
         
         # Apply Loads in ANSYS
         self.mapdl.prep7()
@@ -139,7 +143,7 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # Return info
         info = {"pressure_applied": pressure_val, "max_deformation": max_deformation}
-
+        print("reward:", reward, "deformation:", max_deformation, "pressure:", pressure_val)
         # Gymnasium requires observation, reward, terminated, truncated, info
         return np.array([max_deformation], dtype=np.float32), reward, done, False, info
     
