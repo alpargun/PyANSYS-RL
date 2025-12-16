@@ -1,0 +1,12 @@
+[project]
+name = "pyansys-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ansys-mapdl-core>=0.71.3",
+    "gymnasium>=1.2.2",
+    "stable-baselines3>=2.7.1",
+    "tensorboard>=2.20.0",
+]
