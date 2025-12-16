@@ -28,10 +28,11 @@ class AnsysSoftActuatorEnv(gym.Env):
         if not os.path.exists(run_dir):
             os.makedirs(run_dir)
 
+        # LAUNCH ANSYS MAPDL ---------------------------------------------------
         print(f"Launching ANSYS from: {student_exe}")
         
         self.mapdl = launch_mapdl(
-            loglevel="INFO",
+            loglevel="ERROR", # "INFO" for more details
             exec_file=student_exe,
             run_location=run_dir, # Run in a real folder, not Temp
             nproc=4, # Number of cores to use (max: 4 for Student license)
@@ -44,43 +45,44 @@ class AnsysSoftActuatorEnv(gym.Env):
         # LOAD ANSYS MODEL -----------------------------------------------------
         print(f"Loading Model from {self.dat_path}...")
         
+        # Upload the file to the solver's working directory
+        self.mapdl.upload(self.dat_path)
+
         self.mapdl.clear()
         
         # Enter Pre-processor first
         self.mapdl.prep7()
         
         # Now disable the shape warnings
-        self.mapdl.run('SHPP, OFF') 
-        self.mapdl.run('/NERR, 0, -1') 
+        #self.mapdl.run('SHPP, OFF') # Disable shape checking errors
+        #self.mapdl.run('/NERR, 0, -1') # Suppress error dialogs
         
-        # Stream the file input
-        try:
-            self.mapdl.input(self.dat_path, verbose=True)
-        except Exception as e:
-            print(f"Warning during load: {e}")
+        # Read the file
+        self.mapdl.input(self.dat_path, verbose=True)
 
         self.mapdl.finish()
         self.mapdl.prep7()
         
-        # Verify Load
+        # Check Node Count
         node_count = self.mapdl.mesh.n_node
         print(f"Model Loaded. Node Count: {node_count}")
+        if node_count > 128000:
+            print("WARNING: Node count exceeds Student License limit (128k). Solver might crash.")
         
         # ACTION SPACE
         # Action: Continuous pressure value between 0 and Max Pressure
-        # Shape (1,) means we control 1 variable (Pressure)
         self.action_space = spaces.Box(
             low=np.array([0.0]), 
             high=np.array([self.max_pressure]), 
-            shape=(1,), 
+            shape=(1,), # we control 1 variable (Pressure)
             dtype=np.float32
         )
 
         # OBSERVATION SPACE
         # Observation: Current Deformation in X
         self.observation_space = spaces.Box(
-            low=np.array([-1.0]), # assuming max -1m deformation
-            high=np.array([1.0]), # assuming max +1m deformation
+            low=np.array([-0.5]), # assuming max -0.5 m deformation
+            high=np.array([0.5]), # assuming max +0.5 m deformation
             shape=(1,), 
             dtype=np.float32
         )
@@ -132,8 +134,8 @@ class AnsysSoftActuatorEnv(gym.Env):
             # Calculate Reward
             # Compare the max deformation from the simulation to target deformation
             error = abs(self.target_deformation - max_deformation)
-            reward = - (error * 100) 
-            done = bool(error < 0.0001) 
+            reward = -(error * 100) 
+            done = bool(error < 0.0001) # Done if within 0.1mm tolerance
 
         # Return info
         info = {"pressure_applied": pressure_val, "max_deformation": max_deformation}
@@ -158,7 +160,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.finish()
         
         # Get the zeroed observation
-        self.mapdl.post1()
+        #self.mapdl.post1()
         #zero_def = self.mapdl.get_value('NODE', self.tip_node_id, 'U', 'X')
         #if zero_def is None: zero_def = 0.0
         
@@ -201,7 +203,7 @@ if __name__ == "__main__":
             
             print(f"Step {i+1}:")
             print(f"  Applied Pressure: {info['pressure_applied']:.2f} Pa")
-            print(f"  Resulting Deform: {obs[0]:.6f} m")
+            print(f"  Resulting Deform: {obs[0]*100:.6f} cm")
             print(f"  Reward: {reward:.4f}")
             
             if done:
