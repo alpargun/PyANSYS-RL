@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ansys-mapdl-core>=0.71.3",
     "gymnasium>=1.2.2",
+    "pyqt6>=6.10.1",
     "stable-baselines3>=2.7.1",
     "tensorboard>=2.20.0",
     "tqdm>=4.67.1",
