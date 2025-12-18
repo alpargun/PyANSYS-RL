@@ -1,6 +1,4 @@
 import numpy as np
-import matplotlib
-matplotlib.use('TkAgg') # Use the Tkinter backend
 import matplotlib.pyplot as plt
 from ansys_rl_env import AnsysSoftActuatorEnv
 
@@ -13,8 +11,12 @@ def sweep_pressure():
         #actuation_axis='X'
     )
     
-    # Define range: 0 kPa to 300 kPa in 20 kPa steps
-    pressures_kpa = np.linspace(100, 300, 21)
+    # Define range: 0 kPa to 150 kPa in 10 kPa steps
+    MIN_PRESSURE_KPA = 0
+    MAX_PRESSURE_KPA = 10
+    INCREMENT_KPA = 10
+    num_steps = int((MAX_PRESSURE_KPA - MIN_PRESSURE_KPA) / INCREMENT_KPA) + 1
+    pressures_kpa = np.linspace(MIN_PRESSURE_KPA, MAX_PRESSURE_KPA, num_steps)
     extensions_mm = []
 
     print("Starting Pressure Sweep...")
@@ -29,7 +31,6 @@ def sweep_pressure():
         
         # Manually invoke the solver logic (bypassing step() to ensure steady state)
         env.mapdl.prep7()
-
         env.mapdl.cmsel('S', 'Inner1new') # Explicitly select the internal cavity faces
         env.mapdl.sf('ALL', 'PRES', p_pa) # Apply pressure in Pascals
         env.mapdl.allsel() # Reselect everything so the solver can see the rest of the body
