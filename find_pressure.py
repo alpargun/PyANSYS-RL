@@ -13,7 +13,7 @@ def sweep_pressure():
     
     # Define range: 0 kPa to 150 kPa in 10 kPa steps
     MIN_PRESSURE_KPA = 0
-    MAX_PRESSURE_KPA = 10
+    MAX_PRESSURE_KPA = 150
     INCREMENT_KPA = 10
     num_steps = int((MAX_PRESSURE_KPA - MIN_PRESSURE_KPA) / INCREMENT_KPA) + 1
     pressures_kpa = np.linspace(MIN_PRESSURE_KPA, MAX_PRESSURE_KPA, num_steps)
@@ -73,6 +73,7 @@ def sweep_pressure():
     plt.ylabel('Extension (mm)')
     plt.title('Actuator Characterization Curve')
     plt.legend()
+    plt.savefig("actuator_characterization_curve.png")
     plt.show()
 
     env.close()
