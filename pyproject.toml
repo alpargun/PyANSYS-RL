@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ansys-mapdl-core>=0.71.3",
+    "ansys-tools-visualization-interface>=0.12.1",
     "gymnasium>=1.2.2",
     "pyqt6>=6.10.1",
     "stable-baselines3>=2.7.1",
