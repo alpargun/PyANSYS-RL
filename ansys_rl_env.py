@@ -141,6 +141,8 @@ class AnsysSoftActuatorEnv(gym.Env):
         # CRITICAL: Re-enforce Large Deflection & Substepping every step
         # This prevents the "Explosion" where deformation jumps to 900 meters.
         self.mapdl.nlgeom('ON') # Nonlinear Geometry
+        # FASTER SOLVER
+        self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
 
         # --- C. SOLVE (STABILIZED RAMP) ---
         # --- RAMP SETTINGS ---
@@ -149,14 +151,26 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Force at least 50 steps.
         # Allow up to 1000 steps if it struggles.
         # Minimum 20 steps if it's super stable.
-        self.mapdl.nsubst(50, 10000, 50) # was 1000
-        self.mapdl.neqit(50) # More iterations per step TODO remove?
+        self.mapdl.nsubst(5, 100, 5) # Old: nsubst(50, 10000, 50)
+        self.mapdl.neqit(20) # If can't solve in 20 iters, cut the step size rather than grinding.
 
-        # *** KEY FIX: STABILIZATION ***
-        # This adds "virtual viscosity" to prevent the crash at 100 kPa.
-        # It mimics the robust solver behavior of Workbench.
-        #self.mapdl.run('STABILIZE, CONSTANT, ENERGY, 0.001')
-
+        # REDUCE FILE IO (for RL speed) -------------------------
+        # Only write the LAST substep to the file (prevents disk bloat)
+        ULTRA_FAST = True
+        if not ULTRA_FAST:
+            self.mapdl.outres('ALL', 'LAST')
+        else:
+            # --- THE ULTRA-FAST SETTING ---
+            # 1. Clear previous output settings
+            self.mapdl.outres('ERASE') 
+            # 2. Write ONLY Nodal Solution (NSOL) -> Displacement
+            # We skip stresses (RSOL), strains (ESOL), etc.
+            # We write ONLY the Last substep ('LAST')
+            self.mapdl.outres('NSOL', 'LAST')
+            # If you use this Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) 
+            # later, because that data is not saved.
+            # Displacement (plot_nodal_displacement) WORKS (all we need for RL).
+        
         self.mapdl.solve()
         self.mapdl.finish()
         
