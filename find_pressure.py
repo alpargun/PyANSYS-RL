@@ -5,9 +5,10 @@ from ansys_rl_env import AnsysSoftActuatorEnv
 
 def sweep_pressure():
     # Initialize environment
+    TARGET_DEFORMATION = 0.05 # 5 cm
     env = AnsysSoftActuatorEnv(
         dat_path=r"actuator_setup_150kPa.dat", 
-        target_deformation=0.05, # 2cm target
+        target_deformation=TARGET_DEFORMATION,
         log_level="ERROR"
     )
     
@@ -41,18 +42,21 @@ def sweep_pressure():
     # Plot results
     plt.figure(figsize=(10, 6))
     plt.plot(pressures_kpa, extensions_mm, marker='o', linestyle='-')
-    plt.axhline(y=20, color='r', linestyle='--', label='Target (20mm)')
+    plt.axhline(
+        y=TARGET_DEFORMATION * 100, 
+        color='r', 
+        linestyle='--', 
+        label=f'Target ({TARGET_DEFORMATION * 100} cm)'
+    )
     plt.grid(True)
     plt.xlabel('Pressure (kPa)')
-    plt.ylabel('Extension (mm)')
+    plt.ylabel('Extension (cm)')
     plt.title('Actuator Characterization Curve')
     plt.legend()
     plt.savefig("actuator_characterization_curve.png")
     plt.show()
 
     env.close()
-
-
 
 if __name__ == "__main__":
     sweep_pressure()
