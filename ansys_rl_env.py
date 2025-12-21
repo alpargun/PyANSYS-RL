@@ -2,6 +2,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import os
+from datetime import datetime
 
 from ansys.mapdl.core import launch_mapdl
 
@@ -24,8 +25,10 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Path to ANSYS Student Executable to make sure we use the license
         student_exe = r"C:\Program Files\ANSYS Inc\ANSYS Student\v252\ansys\bin\winx64\ansys252.exe"
         
-        # Create a run folder for ANSYS logs
-        run_dir = r"C:\Ansys_RL_Runs"
+        # Create a timestamped run folder for ANSYS logs
+        run_dir_base = r"C:\Ansys_RL_Runs"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(run_dir_base, f"run_{timestamp}")
         if not os.path.exists(run_dir):
             os.makedirs(run_dir)
 
@@ -49,8 +52,8 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         self.mapdl.clear()
         self.mapdl.prep7() # Enter Pre-processor
-        #self.mapdl.run('SHPP, OFF') # Disable shape checking errors
-        #self.mapdl.run('/NERR, 0, -1') # Suppress error dialogs
+        self.mapdl.run('SHPP, OFF') # Disable shape checking errors
+        self.mapdl.run('/NERR, 0, -1') # Suppress error dialogs
         
         # Read the file
         self.mapdl.input(self.dat_path)
