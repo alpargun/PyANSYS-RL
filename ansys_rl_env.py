@@ -6,7 +6,6 @@ from datetime import datetime
 
 from ansys.mapdl.core import launch_mapdl
 
-
 class AnsysSoftActuatorEnv(gym.Env):
     """
     Custom Environment built on gymnasium interface.
@@ -21,6 +20,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.target_deformation = target_deformation # Target elongation (meters)
         self.max_pressure = 150000.0 # Max pressure in Pascals
         self.actuation_axis = "X" # Axis along which deformation is measured
+        self.current_step_count = 0   # Track steps for "done" logic
         
         # Path to ANSYS Student Executable to make sure we use the license
         student_exe = r"C:\Program Files\ANSYS Inc\ANSYS Student\v252\ansys\bin\winx64\ansys252.exe"
@@ -49,7 +49,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         print(f"Loading Model from {self.dat_path}...")
         # Upload the file to the solver's working directory
         self.mapdl.upload(self.dat_path)
-
         self.mapdl.clear()
         self.mapdl.prep7() # Enter Pre-processor
         self.mapdl.run('SHPP, OFF') # Disable shape checking errors
@@ -57,6 +56,12 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # Read the file
         self.mapdl.input(self.dat_path)
+
+        # FIX for INCREASE ERROR LIMIT (The number of ERROR and WARNING messages exceeds 10000)
+        # Allow up to 10 million warnings (effectively infinite)
+        self.mapdl.run('/NERR, 10000000, 10000000, -1') # '-1' means "Do not abort"
+        # Disable the "Element/Node" integrity check warning printing
+        self.mapdl.run('/NOLIST')
 
         # SIZE and MATERIAL CHECK ----------------------------------------------
         # Check if the size of the model is in Meters or Millimeters.
@@ -92,39 +97,48 @@ class AnsysSoftActuatorEnv(gym.Env):
         # OBSERVATION SPACE
         # Observation: Current Deformation in X
         self.observation_space = spaces.Box(
-            low=np.array([-0.5]), # assuming max -0.5 m deformation
-            high=np.array([0.5]), # assuming max +0.5 m deformation
+            low=np.array([-0.3]), # assuming max -0.3 m deformation
+            high=np.array([0.3]), # assuming max +0.3 m deformation
             shape=(1,), 
             dtype=np.float32
         )
         
     def step(self, action):
+        self.current_step_count += 1
         # Unpack Action and clip it to ensure it stays within bounds
         #pressure_val = np.clip(action[0], 0, self.max_pressure)
         raw_action = np.clip(action[0], -1.0, 1.0)
         pressure_val = ((raw_action + 1.0) / 2.0) * self.max_pressure
         
-        # APPLY LOAD -----------------------------------------------------------
         self.mapdl.prep7()
 
+        # ======================================================================  
+        # Suppress warnings temporarily before selecting surfaces (Speed Boost)
+        self.mapdl.run('/NERR, 0, -1')
+        # ======================================================================
+
+        #  ANCHOR BASE (Robust Coordinate Selection) ---------------------------
+        # Select nodes near X=0 and lock them
+        self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001)
+        if self.mapdl.mesh.n_node > 0:
+            self.mapdl.d('ALL', 'ALL', 0)
         # Select the fixed support
         self.mapdl.cmsel('S', 'FixedSupport')
         # 2. Lock it (Displacement = 0 in All Directions)
         # 'D' command applies displacement constraints
         self.mapdl.d('ALL', 'ALL', 0)
 
-        #self.mapdl.sf('ALL', 'PRES', 0) # Remove previous loads
+        # APPLY PRESSURE LOAD --------------------------------------------------
         # Select the faces for pressure (Named Selection 'Inner1new')
         self.mapdl.cmsel('S', 'Inner1new')
-        # B. Select ALL elements attached to these nodes (Solids + Surfs)
+        # Select ALL elements attached to these nodes (Solids + Surfs)
         self.mapdl.esln('S')
-
-        # C. THE FIX: Unselect Surface Effect Elements (Type 154)
+        # THE FIX: Unselect Surface Effect Elements (Type 154)
         # This removes the "Skin" from the active set so we don't double-load it.
         # We are left with ONLY the Solid elements (Type 180-189).
         self.mapdl.esel('U', 'ENAME', '', 154)
 
-        # D. Apply Pressure to the remaining (Solid) elements
+        # Apply Pressure to the remaining (Solid) elements
         # Since the Surfs are hidden, the pressure only applies once.
         self.mapdl.sf('ALL', 'PRES', pressure_val)
         
@@ -134,6 +148,11 @@ class AnsysSoftActuatorEnv(gym.Env):
             return np.array([0.0], dtype=np.float32), -20.0, True, False, {}
         # Apply the new pressure (SF command in APDL)
         #self.mapdl.sf('ALL', 'PRES', pressure_val)
+
+        # ======================================================================
+        # RE-ENABLE WARNINGS --------------------------------------------------- 
+        self.mapdl.run('/NERR, 10000000, 10000000, -1')
+        # ======================================================================
 
         # Select everything again for solving
         self.mapdl.allsel()
@@ -147,14 +166,11 @@ class AnsysSoftActuatorEnv(gym.Env):
         # FASTER SOLVER
         self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
 
-        # --- C. SOLVE (STABILIZED RAMP) ---
-        # --- RAMP SETTINGS ---
+        # SOLVE (RAMP) ---------------------------------------------------------
         self.mapdl.kbc(0) # 0 = RAMPED loading (linear interpolation)
         #self.mapdl.time(1.0) # Set virtual "End Time" for the step
-        # Force at least 50 steps.
-        # Allow up to 1000 steps if it struggles.
-        # Minimum 20 steps if it's super stable.
-        self.mapdl.nsubst(5, 100, 5) # Old: nsubst(50, 10000, 50)
+        # Max 100 steps if it struggles, min 5 steps if stable enough.
+        self.mapdl.nsubst(5, 100, 5) # Old: nsubst(50, 1000, 50)
         self.mapdl.neqit(20) # If can't solve in 20 iters, cut the step size rather than grinding.
 
         # REDUCE FILE IO (for RL speed) -------------------------
@@ -164,14 +180,13 @@ class AnsysSoftActuatorEnv(gym.Env):
             self.mapdl.outres('ALL', 'LAST')
         else:
             # --- THE ULTRA-FAST SETTING ---
-            # 1. Clear previous output settings
-            self.mapdl.outres('ERASE') 
-            # 2. Write ONLY Nodal Solution (NSOL) -> Displacement
+            self.mapdl.outres('ERASE') # Clear previous output settings
+            # Write ONLY Nodal Solution (NSOL) -> Displacement
             # We skip stresses (RSOL), strains (ESOL), etc.
             # We write ONLY the Last substep ('LAST')
             self.mapdl.outres('NSOL', 'LAST')
-            # If you use this Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) 
-            # later, because that data is not saved.
+            # In Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) later,
+            # because that data is not saved.
             # Displacement (plot_nodal_displacement) WORKS (all we need for RL).
         
         self.mapdl.solve()
@@ -191,13 +206,13 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.allsel()
         # Calculate max deformation across all nodes
         self.mapdl.nsort('U', self.actuation_axis) # Sort nodes by deformation
-
+        
         # Measure Extension Relative to Base (Tip - Base)
         # This is immune to base sliding.
-
         # Get Tip (Min Displacement - assuming extension in -X)
         tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')        
         # Get Base (Max Displacement - usually 0)
+        self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001) # Check for sliding
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.nsort('U', self.actuation_axis)
         base_disp = self.mapdl.get_value('SORT', 0, 'MAX')
@@ -214,7 +229,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         # cur_deformation = max(abs(max_deformation), abs(min_deformation))
         # ======================================================================
 
-
         # EXPLOSION GUARD ------------------------------------------------------
         # If the deformation is physically impossible (e.g., > 20cm),
         # it means the mesh inverted. Stop the episode to save the RL training.
@@ -227,13 +241,17 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Compare the max deformation from the simulation to target deformation
         error = abs(self.target_deformation - cur_deformation)
         reward = -(error * 100)
-        done = bool(error < 0.0001) # Done if within 0.1mm tolerance
+
+        # Done logic
+        #done = bool(error < 0.0001) # Done if within 0.1mm tolerance
+        terminated = bool(error < 0.0005) # 0.5mm tolerance
+        truncated = bool(self.current_step_count >= 100) # Force stop after 100 steps
 
         # Return info
         info = {"pressure_applied": pressure_val, "max_deformation": cur_deformation}
-        print("reward:", reward, "deformation (cm):", cur_deformation*100, "pressure:", pressure_val)
+        print(f"Step {self.current_step_count} --> reward: {reward}, deformation (cm): {cur_deformation*100}, pressure: {pressure_val}")
         # Gymnasium requires observation, reward, terminated, truncated, info
-        return np.array([cur_deformation], dtype=np.float32), reward, done, False, info
+        return np.array([cur_deformation], dtype=np.float32), reward, terminated, truncated, info
     
 
     def reset(self, seed=None):
@@ -250,7 +268,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.run('/SOLU')
         self.mapdl.antype('STATIC')
         #self.mapdl.kbc(1)        
-        #self.mapdl.nsubst(1, 1, 1)
+        self.mapdl.nsubst(1, 1, 1)
         self.mapdl.solve()
         self.mapdl.finish()
         
@@ -268,7 +286,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.set('LAST')
         print("Rendering...")
         self.mapdl.post_processing.plot_nodal_displacement(
-            component='X', #self.actuation_axis,
+            component=self.actuation_axis,
             show_edges=True,
             cmap="jet",
             cpos="xy",
