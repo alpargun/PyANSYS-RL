@@ -112,11 +112,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         self.mapdl.prep7()
 
-        # ======================================================================  
-        # Suppress warnings temporarily before selecting surfaces (Speed Boost)
-        self.mapdl.run('/NERR, 0, -1')
-        # ======================================================================
-
         #  ANCHOR BASE (Robust Coordinate Selection) ---------------------------
         # Select nodes near X=0 and lock them
         self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001)
@@ -136,24 +131,12 @@ class AnsysSoftActuatorEnv(gym.Env):
         # THE FIX: Unselect Surface Effect Elements (Type 154)
         # This removes the "Skin" from the active set so we don't double-load it.
         # We are left with ONLY the Solid elements (Type 180-189).
-        self.mapdl.esel('U', 'ENAME', '', 154)
+        self.mapdl.esel('R', 'ENAME', '', 154)
 
         # Apply Pressure to the remaining (Solid) elements
         # Since the Surfs are hidden, the pressure only applies once.
-        self.mapdl.sf('ALL', 'PRES', pressure_val)
+        self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
         
-        if self.mapdl.mesh.n_node < 1:
-            # Physics Broken: Selection empty
-            print("DEBUG: Empty Selection for Pressure Application. Resetting.")
-            return np.array([0.0], dtype=np.float32), -20.0, True, False, {}
-        # Apply the new pressure (SF command in APDL)
-        #self.mapdl.sf('ALL', 'PRES', pressure_val)
-
-        # ======================================================================
-        # RE-ENABLE WARNINGS --------------------------------------------------- 
-        self.mapdl.run('/NERR, 10000000, 10000000, -1')
-        # ======================================================================
-
         # Select everything again for solving
         self.mapdl.allsel()
         
@@ -229,14 +212,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         # cur_deformation = max(abs(max_deformation), abs(min_deformation))
         # ======================================================================
 
-        # EXPLOSION GUARD ------------------------------------------------------
-        # If the deformation is physically impossible (e.g., > 20cm),
-        # it means the mesh inverted. Stop the episode to save the RL training.
-        if cur_deformation > 0.20: # Limit: 200mm
-            print(f"DEBUG: Physics Explosion ({cur_deformation:.2f} m). Resetting.")
-            # We return the limit value (0.2) to keep the neural net inputs stable
-            return np.array([0.2], dtype=np.float32), -10.0, True, False, {"pressure": pressure_val, "extension": cur_deformation}
-
         # CALCULATE REWARD -----------------------------------------------------
         # Compare the max deformation from the simulation to target deformation
         error = abs(self.target_deformation - cur_deformation)
@@ -249,7 +224,7 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # Return info
         info = {"pressure_applied": pressure_val, "max_deformation": cur_deformation}
-        print(f"Step {self.current_step_count} --> reward: {reward}, deformation (cm): {cur_deformation*100}, pressure: {pressure_val}")
+        print(f"Step {self.current_step_count} | reward: {reward}, deformation(cm): {cur_deformation*100}, pressure: {pressure_val}")
         # Gymnasium requires observation, reward, terminated, truncated, info
         return np.array([cur_deformation], dtype=np.float32), reward, terminated, truncated, info
     
@@ -259,6 +234,8 @@ class AnsysSoftActuatorEnv(gym.Env):
         Reset the environment to an initial state. (Load 0)
         """
         super().reset(seed=seed)
+
+        self.current_step_count = 0
         
         # In FEA, reset usually means unloading the structure
         self.mapdl.prep7()
