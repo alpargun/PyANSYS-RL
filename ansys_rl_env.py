@@ -149,11 +149,10 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
 
         # SOLVE (RAMP) ---------------------------------------------------------
-        #self.mapdl.kbc(0) # 0 = RAMPED loading (linear interpolation)
-        #self.mapdl.time(1.0) # Set virtual "End Time" for the step
+        self.mapdl.kbc(0) # ensure RAMPED loading 
         # Max 100 steps if it struggles, min 5 steps if stable enough.
         self.mapdl.nsubst(5, 100, 5) # Old: nsubst(50, 1000, 50)
-        self.mapdl.neqit(20) # If can't solve in 20 iters, cut the step size rather than grinding.
+        self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
 
         # REDUCE FILE IO (for RL speed) -------------------------
         # Only write the LAST substep to the file (prevents disk bloat)
