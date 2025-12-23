@@ -81,13 +81,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         if node_count > 128000:
             print("WARNING: Node count exceeds Student License limit (128k). Solver might crash.")
 
-        # Apply BCs once here (Anchor base, etc.)
-        self.mapdl.prep7()
-        self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001)
-        # self.mapdl.cmsel('S', 'FixedSupport')
-        self.mapdl.d('ALL', 'ALL', 0) # 'D' command applies displacement constraints
-        self.mapdl.allsel()
-        
         # SAVE THE CLEAN STATE
         self.mapdl.save('base_state') # Saves base_state.db
 
@@ -201,15 +194,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Calculate pure extension magnitude
         cur_deformation = abs(tip_disp - base_disp)
 
-        # ======================================================================
-        # OLD EXTENSION CALCULATION --------------------------------------------
-        # # Get BOTH extremes
-        # max_deformation = self.mapdl.get_value('SORT', 0, 'MAX')
-        # min_deformation = self.mapdl.get_value('SORT', 0, 'MIN')
-        # # Take the largest magnitude (Absolute Value)
-        # cur_deformation = max(abs(max_deformation), abs(min_deformation))
-        # ======================================================================
-
         # CALCULATE REWARD -----------------------------------------------------
         # Compare the max deformation from the simulation to target deformation
         error = abs(self.target_deformation - cur_deformation)
@@ -268,10 +252,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         print(f"--- VERIFYING MATERIAL {mat_id} ---")
         # Check Hyperelastic Table
         output = self.mapdl.run(f"TBLIST, ALL, {mat_id}")
-        print(output)
         if "HYPER" in output or "NEO" in output:
             print(f"SUCCESS: Material {mat_id} is Hyperelastic (Rubber).")
-            # print(output) # Uncomment to see full table
+            print(output) # Uncomment to see full table
         else:
             print(f"WARNING: Material {mat_id} looks like STEEL or Undefined.")
 
