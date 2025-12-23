@@ -81,6 +81,16 @@ class AnsysSoftActuatorEnv(gym.Env):
         if node_count > 128000:
             print("WARNING: Node count exceeds Student License limit (128k). Solver might crash.")
 
+        # Apply BCs once here (Anchor base, etc.)
+        self.mapdl.prep7()
+        self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001)
+        # self.mapdl.cmsel('S', 'FixedSupport')
+        self.mapdl.d('ALL', 'ALL', 0) # 'D' command applies displacement constraints
+        self.mapdl.allsel()
+        
+        # SAVE THE CLEAN STATE
+        self.mapdl.save('base_state') # Saves base_state.db
+
         self.mapdl.finish()
 
         # ACTION SPACE
@@ -112,17 +122,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         self.mapdl.prep7()
 
-        #  ANCHOR BASE (Robust Coordinate Selection) ---------------------------
-        # Select nodes near X=0 and lock them
-        self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001)
-        if self.mapdl.mesh.n_node > 0:
-            self.mapdl.d('ALL', 'ALL', 0)
-        # Select the fixed support
-        self.mapdl.cmsel('S', 'FixedSupport')
-        # 2. Lock it (Displacement = 0 in All Directions)
-        # 'D' command applies displacement constraints
-        self.mapdl.d('ALL', 'ALL', 0)
-
         # APPLY PRESSURE LOAD --------------------------------------------------
         # Select the faces for pressure (Named Selection 'Inner1new')
         self.mapdl.cmsel('S', 'Inner1new')
@@ -150,7 +149,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
 
         # SOLVE (RAMP) ---------------------------------------------------------
-        self.mapdl.kbc(0) # 0 = RAMPED loading (linear interpolation)
+        #self.mapdl.kbc(0) # 0 = RAMPED loading (linear interpolation)
         #self.mapdl.time(1.0) # Set virtual "End Time" for the step
         # Max 100 steps if it struggles, min 5 steps if stable enough.
         self.mapdl.nsubst(5, 100, 5) # Old: nsubst(50, 1000, 50)
@@ -237,22 +236,16 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         self.current_step_count = 0
         
+        # --- INSTANT RESET ---
+        # Instead of solving physics, just reload the clean memory
+        self.mapdl.resume('base_state')
+
         # In FEA, reset usually means unloading the structure
         self.mapdl.prep7()
         self.mapdl.sf('ALL', 'PRES', 0) # Remove pressure
-        
-        # Run a quick solve to zero out deformations
+
+        # Go to solution processor for the next step
         self.mapdl.run('/SOLU')
-        self.mapdl.antype('STATIC')
-        #self.mapdl.kbc(1)        
-        self.mapdl.nsubst(1, 1, 1)
-        self.mapdl.solve()
-        self.mapdl.finish()
-        
-        # Get the zeroed observation
-        #self.mapdl.post1()
-        #zero_def = self.mapdl.get_value('NODE', self.tip_node_id, 'U', 'X')
-        #if zero_def is None: zero_def = 0.0
         
         return np.array([0.0], dtype=np.float32), {}
 
