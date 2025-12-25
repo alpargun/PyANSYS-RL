@@ -56,6 +56,10 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # Read the file
         self.mapdl.input(self.dat_path)
+        
+        # Re-enter preprocessor again as dat file ends with FINISH
+        self.mapdl.prep7()
+        self.mapdl.allsel() # Ensure you can see/edit the whole model
 
         # FIX for INCREASE ERROR LIMIT (The number of ERROR and WARNING messages exceeds 10000)
         # Allow up to 10 million warnings (effectively infinite)
@@ -75,6 +79,10 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.check_material_properties(1)
         # ----------------------------------------------------------------------
         
+        # Ensure the FixedSupport is fixed
+        self.mapdl.cmsel('S', 'FixedSupport')
+        self.mapdl.d('ALL', 'ALL', 0)
+
         # Check Node Count
         node_count = self.mapdl.mesh.n_node
         print(f"Model Loaded. Node Count: {node_count}")
@@ -140,11 +148,12 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.nlgeom('ON') # Nonlinear Geometry
         # FASTER SOLVER
         self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
+        self.mapdl.run('SOLCONTROL, ON')  # Activates optimized nonlinear defaults
 
         # SOLVE (RAMP) ---------------------------------------------------------
         self.mapdl.kbc(0) # ensure RAMPED loading 
         # Max 100 steps if it struggles, min 5 steps if stable enough.
-        self.mapdl.nsubst(5, 100, 5) # Old: nsubst(50, 1000, 50)
+        self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
         self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
 
         # REDUCE FILE IO (for RL speed) -------------------------
@@ -186,7 +195,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Get Tip (Min Displacement - assuming extension in -X)
         tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')        
         # Get Base (Max Displacement - usually 0)
-        self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001) # Check for sliding
+        #self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001) # Check for sliding
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.nsort('U', self.actuation_axis)
         base_disp = self.mapdl.get_value('SORT', 0, 'MAX')
@@ -209,23 +218,17 @@ class AnsysSoftActuatorEnv(gym.Env):
         print(f"Step {self.current_step_count} | reward: {reward}, deformation(cm): {cur_deformation*100}, pressure: {pressure_val}")
         # Gymnasium requires observation, reward, terminated, truncated, info
         return np.array([cur_deformation], dtype=np.float32), reward, terminated, truncated, info
-    
 
     def reset(self, seed=None):
         """
         Reset the environment to an initial state. (Load 0)
         """
         super().reset(seed=seed)
-
         self.current_step_count = 0
+        self.mapdl.finish()
         
-        # --- INSTANT RESET ---
         # Instead of solving physics, just reload the clean memory
-        self.mapdl.resume('base_state')
-
-        # In FEA, reset usually means unloading the structure
-        self.mapdl.prep7()
-        self.mapdl.sf('ALL', 'PRES', 0) # Remove pressure
+        self.mapdl.resume('base_state') # Resume Clean State (No loads, Time=0)
 
         # Go to solution processor for the next step
         self.mapdl.run('/SOLU')
@@ -257,7 +260,6 @@ class AnsysSoftActuatorEnv(gym.Env):
             print(output) # Uncomment to see full table
         else:
             print(f"WARNING: Material {mat_id} looks like STEEL or Undefined.")
-
 
     def close(self):
         """
