@@ -95,9 +95,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.finish()
 
         # ACTION SPACE
-        # Action: Continuous pressure value between 0 and Max Pressure
-        # The agent will output values between -1 and 1.
-        # Scale this to 0 - 100,000 Pa later.
+        # The agent will output values between -1 and 1. Scale to 0-Max Pressure later
         self.action_space = spaces.Box(
             low=np.array([-1.0]), #low=np.array([0.0]), 
             high=np.array([1.0]), #high=np.array([self.max_pressure]),
@@ -117,7 +115,6 @@ class AnsysSoftActuatorEnv(gym.Env):
     def step(self, action):
         self.current_step_count += 1
         # Unpack Action and clip it to ensure it stays within bounds
-        #pressure_val = np.clip(action[0], 0, self.max_pressure)
         raw_action = np.clip(action[0], -1.0, 1.0)
         pressure_val = ((raw_action + 1.0) / 2.0) * self.max_pressure
         
@@ -128,9 +125,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.cmsel('S', 'Inner1new')
         # Select ALL elements attached to these nodes (Solids + Surfs)
         self.mapdl.esln('S')
-        # THE FIX: Unselect Surface Effect Elements (Type 154)
-        # This removes the "Skin" from the active set so we don't double-load it.
-        # We are left with ONLY the Solid elements (Type 180-189).
+        # Filter out Surface Effect elements (154) so we don't double load
         self.mapdl.esel('R', 'ENAME', '', 154)
 
         # Apply Pressure to the remaining (Solid) elements
@@ -191,10 +186,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.nsort('U', self.actuation_axis) # Sort nodes by deformation
         
         # Measure Extension Relative to Base (Tip - Base)
-        # This is immune to base sliding.
         # Get Tip (Min Displacement - assuming extension in -X)
         tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')        
-        # Get Base (Max Displacement - usually 0)
+        # Get Base (Max Displacement 0)
         #self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001) # Check for sliding
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.nsort('U', self.actuation_axis)
@@ -236,19 +230,21 @@ class AnsysSoftActuatorEnv(gym.Env):
         return np.array([0.0], dtype=np.float32), {}
 
     def render(self):
-        """Visualizes the robot state"""
-        self.mapdl.allsel() # Ensure all entities are selected
+        print("Rendering snapshot...")
+        
+        # Enter Post-Processor
         self.mapdl.post1()
         self.mapdl.set('LAST')
-        print("Rendering...")
-        self.mapdl.post_processing.plot_nodal_displacement(
-            component=self.actuation_axis,
-            show_edges=True,
-            cmap="jet",
-            cpos="xy",
-            displacement_factor=1.0, # 1.0 = True Scale. Change to 0.0 to see undeformed.
-            overlay_wireframe=True # Shows the original grey mesh outline for comparison
-        )
+        self.mapdl.allsel()
+        
+        self.mapdl.show('PNG') # render to PNG format
+        
+        # Create the Plot
+        # PLNSOL, U, X  -> Plot Nodal Solution, Deformation, X-Axis
+        # 1, 1          -> Show undeformed shape (wireframe) + Deformed shape
+        self.mapdl.plnsol('U', 'X', 1, 1) 
+        
+        self.mapdl.show('CLOSE')
 
     def check_material_properties(self, mat_id):
         """Helper to print what ANSYS sees for the material"""
