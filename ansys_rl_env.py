@@ -18,10 +18,18 @@ class AnsysSoftActuatorEnv(gym.Env):
         # CONFIGURATION
         self.dat_path = dat_path # .dat file for the solution from ANSYS Mechanical
         self.target_deformation = target_deformation # Target elongation (meters)
-        self.max_pressure = 150000.0 # Max pressure in Pascals
+
+        # Pressure Range (Vacuum to Expansion)
+        self.min_pressure = 0.0 
+        self.max_pressure = 130000.0 # Max pressure in Pascals
+
         self.actuation_axis = "X" # Axis along which deformation is measured
         self.current_step_count = 0   # Track steps for "done" logic
         
+        # TIME MANAGEMENT (The missing link for Hysteresis)
+        self.sim_time = 0.0
+        self.dt = 0.1  # 10 steps = 1 second of physics
+
         # Path to ANSYS Student Executable to make sure we use the license
         student_exe = r"C:\Program Files\ANSYS Inc\ANSYS Student\v252\ansys\bin\winx64\ansys252.exe"
         
@@ -114,11 +122,20 @@ class AnsysSoftActuatorEnv(gym.Env):
         
     def step(self, action):
         self.current_step_count += 1
+        # Advance Time (Critical for Hysteresis)
+        self.sim_time += self.dt
+
         # Unpack Action and clip it to ensure it stays within bounds
         raw_action = np.clip(action[0], -1.0, 1.0)
-        pressure_val = ((raw_action + 1.0) / 2.0) * self.max_pressure
+        # P = Min + (Max - Min) * ( (Action + 1) / 2 )
+        pressure_range = self.max_pressure - self.min_pressure
+        norm_action = (raw_action + 1.0) / 2.0
+        pressure_val = self.min_pressure + (pressure_range * norm_action)
         
         self.mapdl.prep7()
+
+        # Check if self contact is active
+        self.check_contact_status()
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         # Select the faces for pressure (Named Selection 'Inner1new')
@@ -138,6 +155,17 @@ class AnsysSoftActuatorEnv(gym.Env):
         # RUN SOLVER -----------------------------------------------------------
         self.mapdl.run('/SOLU')
         self.mapdl.antype('STATIC') # Ensure Static Analysis
+
+        # For hysteresis effect
+        self.mapdl.timint('ON') # Enables Hysteresis/Viscoelasticity in Static Mode
+        self.mapdl.time(self.sim_time) # <--- TELL ANSYS WHAT TIME IT IS
+
+        self.mapdl.lnsrch('ON')   # <--- CRITICAL: Line Search prevents divergence at 120kPa
+        self.mapdl.pred('ON')     # <--- CRITICAL: Predictor helps follow the curve
+        self.mapdl.nsubst(2, 5000, 2) # Start with 2 steps. If unstable, add steps.
+        self.mapdl.neqit(20)      # Allow more attempts (default is 15, too low for rubber)
+        # ======================================================================
+
         # CRITICAL: Re-enforce Large Deflection & Substepping every step
         # This prevents the "Explosion" where deformation jumps to 900 meters.
         self.mapdl.nlgeom('ON') # Nonlinear Geometry
@@ -148,8 +176,8 @@ class AnsysSoftActuatorEnv(gym.Env):
         # SOLVE (RAMP) ---------------------------------------------------------
         self.mapdl.kbc(0) # ensure RAMPED loading 
         # Max 100 steps if it struggles, min 5 steps if stable enough.
-        self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
-        self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
+        #self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
+        #self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
 
         # REDUCE FILE IO (for RL speed) -------------------------
         # Only write the LAST substep to the file (prevents disk bloat)
@@ -256,6 +284,28 @@ class AnsysSoftActuatorEnv(gym.Env):
             print(output) # Uncomment to see full table
         else:
             print(f"WARNING: Material {mat_id} looks like STEEL or Undefined.")
+
+    def check_contact_status(self):
+        """Prints status of all contact pairs in the model."""
+        print("\n--- CHECKING CONTACT DEFINITIONS ---")
+        
+        # 1. List all Element Types to see if Contact exists
+        # Look for IDs like 170 (Target) and 173/174 (Contact)
+        print("Element Types Defined:")
+        self.mapdl.etlist()
+        
+        # 2. Check Contact Status
+        # CNCHECK prints a report: Are pairs "Open" (not touching) or "Closed" (touching)?
+        print("\nContact Pair Status:")
+        output = self.mapdl.run("CNCHECK, DETAIL")
+        print(output)
+        
+        # 3. Count Contact Elements
+        # Select all Contact elements
+        self.mapdl.esel("S", "ENAME", "", 173, 174)
+        count = self.mapdl.get_value("ELEM", 0, "COUNT")
+        print(f"\nTotal Contact Elements Active: {count}")
+        self.mapdl.allsel()
 
     def close(self):
         """
