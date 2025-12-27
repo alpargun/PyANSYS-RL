@@ -76,23 +76,18 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.run('/NOLIST')
 
         # SIZE and MATERIAL CHECK ----------------------------------------------
-        # Check if the size of the model is in Meters or Millimeters.
-        self.mapdl.allsel()
-        xmin = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
-        xmax = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
-        model_len = xmax - xmin
-        print(f"\n--- CONFIGURING UNITS & MATERIAL ---")
-        print(f"Detected Model Length: {model_len:.4f}")
-        # Verify materials are correct (Hyperelastic for soft robots)
-        self.check_material_properties(1)
-        # ----------------------------------------------------------------------
+        CHECK_MATERIAL = False
+        if CHECK_MATERIAL:
+            self.check_material_properties(1)
         
         # Ensure the FixedSupport is fixed
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.d('ALL', 'ALL', 0)
 
         # Check if self contact is active
-        self.check_contact_status()
+        CHECK_SELF_CONTACT = False
+        if CHECK_SELF_CONTACT:
+            self.check_contact_status()
 
         # Check Node Count
         node_count = self.mapdl.mesh.n_node
@@ -276,6 +271,14 @@ class AnsysSoftActuatorEnv(gym.Env):
 
     def check_material_properties(self, mat_id):
         """Helper to print what ANSYS sees for the material"""
+        # Check if the size of the model is in Meters or Millimeters.
+        self.mapdl.allsel()
+        xmin = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
+        xmax = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
+        model_len = xmax - xmin
+        print(f"\n--- CONFIGURING UNITS & MATERIAL ---")
+        print(f"Detected Model Length: {model_len:.4f}")
+        # Verify materials are correct (Hyperelastic for soft robots)
         print(f"--- VERIFYING MATERIAL {mat_id} ---")
         # Check Hyperelastic Table
         output = self.mapdl.run(f"TBLIST, ALL, {mat_id}")
