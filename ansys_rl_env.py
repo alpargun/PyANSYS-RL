@@ -91,6 +91,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.d('ALL', 'ALL', 0)
 
+        # Check if self contact is active
+        self.check_contact_status()
+
         # Check Node Count
         node_count = self.mapdl.mesh.n_node
         print(f"Model Loaded. Node Count: {node_count}")
@@ -133,9 +136,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         pressure_val = self.min_pressure + (pressure_range * norm_action)
         
         self.mapdl.prep7()
-
-        # Check if self contact is active
-        self.check_contact_status()
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         # Select the faces for pressure (Named Selection 'Inner1new')
