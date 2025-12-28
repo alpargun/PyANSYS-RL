@@ -12,7 +12,7 @@ class AnsysSoftActuatorEnv(gym.Env):
     Connects to ANSYS MAPDL to control a soft pneumatic actuator.
     """
     
-    def __init__(self, dat_path, target_deformation=0.015, log_level="INFO"):
+    def __init__(self, dat_path, target_deformation=0.05, log_level="INFO"):
         super(AnsysSoftActuatorEnv, self).__init__()
         
         # CONFIGURATION
@@ -21,10 +21,11 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # Pressure Range (Vacuum to Expansion)
         self.min_pressure = 0.0 
-        self.max_pressure = 130000.0 # Max pressure in Pascals
+        self.max_pressure = 120000.0 # Max pressure in Pascals
 
         self.actuation_axis = "X" # Axis along which deformation is measured
         self.current_step_count = 0   # Track steps for "done" logic
+        self.last_pressure = 0.0
         
         # TIME MANAGEMENT (The missing link for Hysteresis)
         self.sim_time = 0.0
@@ -76,23 +77,18 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.run('/NOLIST')
 
         # SIZE and MATERIAL CHECK ----------------------------------------------
-        # Check if the size of the model is in Meters or Millimeters.
-        self.mapdl.allsel()
-        xmin = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
-        xmax = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
-        model_len = xmax - xmin
-        print(f"\n--- CONFIGURING UNITS & MATERIAL ---")
-        print(f"Detected Model Length: {model_len:.4f}")
-        # Verify materials are correct (Hyperelastic for soft robots)
-        self.check_material_properties(1)
-        # ----------------------------------------------------------------------
+        CHECK_MATERIAL = False
+        if CHECK_MATERIAL:
+            self.check_material_properties(1)
         
         # Ensure the FixedSupport is fixed
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.d('ALL', 'ALL', 0)
 
         # Check if self contact is active
-        self.check_contact_status()
+        CHECK_SELF_CONTACT = False
+        if CHECK_SELF_CONTACT:
+            self.check_contact_status()
 
         # Check Node Count
         node_count = self.mapdl.mesh.n_node
@@ -135,8 +131,54 @@ class AnsysSoftActuatorEnv(gym.Env):
         norm_action = (raw_action + 1.0) / 2.0
         pressure_val = self.min_pressure + (pressure_range * norm_action)
         
-        self.mapdl.prep7()
+        # --- HYBRID STEPPING LOGIC ---
+        # 1. Calculate the magnitude of the jump
+        delta_p = abs(pressure_val - self.last_pressure)
+        self.last_pressure = pressure_val # Update tracker
+        
+        self.mapdl.run('/SOLU', mute=True)
+        self.mapdl.antype('STATIC') 
+        self.mapdl.timint('ON')
+        self.mapdl.time(self.sim_time)
+        self.mapdl.nlgeom('ON')
+        self.mapdl.lnsrch('ON')    
+        self.mapdl.kbc(0) # Ramped loading
 
+        # === CRUISING MODE (FAST) === 
+        if delta_p <= 10000: # THRESHOLD: 10 kPa.
+            self.mapdl.pred('ON')      
+            self.mapdl.nropt('AUTO')   
+            self.mapdl.nsubst(1, 5, 1)
+        # === COMBAT MODE (OPTIMIZED) ===
+        else:
+            self.mapdl.pred('OFF')     
+            self.mapdl.nropt('FULL')   
+            
+            # SPEED OPTIMIZATION:
+            # Example: 100k jump -> 12 steps (instead of 20). 
+            safe_increment = 8000.0 # 5000 for more conservative
+            
+            n_start = int(delta_p / safe_increment)
+            n_start = np.clip(n_start, 5, 50) 
+            self.mapdl.nsubst(n_start, 10000, 5)
+
+        self.mapdl.outres('ERASE')
+        self.mapdl.outres('NSOL', 'LAST')
+
+        # REDUCE FILE IO (for RL speed) -------------------------
+        # Only write the LAST substep to the file (prevents disk bloat)
+        ULTRA_FAST = True
+        if not ULTRA_FAST:
+            self.mapdl.outres('ALL', 'LAST')
+        else:
+            # --- THE ULTRA-FAST SETTING ---
+            self.mapdl.outres('ERASE') # Clear previous output settings
+            # Write ONLY Nodal Solution (NSOL) -> Displacement
+            # We skip stresses (RSOL), strains (ESOL), etc.
+            self.mapdl.outres('NSOL', 'LAST') # write ONLY the last substep ('LAST')
+            # In Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) later,
+            # because that data is not saved but Displacement (plot_nodal_displacement) works
+        
         # APPLY PRESSURE LOAD --------------------------------------------------
         # Select the faces for pressure (Named Selection 'Inner1new')
         self.mapdl.cmsel('S', 'Inner1new')
@@ -151,50 +193,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # Select everything again for solving
         self.mapdl.allsel()
-        
-        # RUN SOLVER -----------------------------------------------------------
-        self.mapdl.run('/SOLU')
-        self.mapdl.antype('STATIC') # Ensure Static Analysis
-
-        # For hysteresis effect
-        self.mapdl.timint('ON') # Enables Hysteresis/Viscoelasticity in Static Mode
-        self.mapdl.time(self.sim_time) # <--- TELL ANSYS WHAT TIME IT IS
-
-        self.mapdl.lnsrch('ON')   # <--- CRITICAL: Line Search prevents divergence at 120kPa
-        self.mapdl.pred('ON')     # <--- CRITICAL: Predictor helps follow the curve
-        self.mapdl.nsubst(2, 5000, 2) # Start with 2 steps. If unstable, add steps.
-        self.mapdl.neqit(20)      # Allow more attempts (default is 15, too low for rubber)
-        # ======================================================================
-
-        # CRITICAL: Re-enforce Large Deflection & Substepping every step
-        # This prevents the "Explosion" where deformation jumps to 900 meters.
-        self.mapdl.nlgeom('ON') # Nonlinear Geometry
-        # FASTER SOLVER
-        self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
-        self.mapdl.run('SOLCONTROL, ON')  # Activates optimized nonlinear defaults
-
-        # SOLVE (RAMP) ---------------------------------------------------------
-        self.mapdl.kbc(0) # ensure RAMPED loading 
-        # Max 100 steps if it struggles, min 5 steps if stable enough.
-        #self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
-        #self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
-
-        # REDUCE FILE IO (for RL speed) -------------------------
-        # Only write the LAST substep to the file (prevents disk bloat)
-        ULTRA_FAST = True
-        if not ULTRA_FAST:
-            self.mapdl.outres('ALL', 'LAST')
-        else:
-            # --- THE ULTRA-FAST SETTING ---
-            self.mapdl.outres('ERASE') # Clear previous output settings
-            # Write ONLY Nodal Solution (NSOL) -> Displacement
-            # We skip stresses (RSOL), strains (ESOL), etc.
-            # We write ONLY the Last substep ('LAST')
-            self.mapdl.outres('NSOL', 'LAST')
-            # In Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) later,
-            # because that data is not saved.
-            # Displacement (plot_nodal_displacement) WORKS (all we need for RL).
-        
         self.mapdl.solve()
         self.mapdl.finish()
         
@@ -247,13 +245,12 @@ class AnsysSoftActuatorEnv(gym.Env):
         """
         super().reset(seed=seed)
         self.current_step_count = 0
+        self.sim_time = 0.0 
+        self.last_pressure = 0.0  # Reset Pressure Tracker
+
         self.mapdl.finish()
-        
         # Instead of solving physics, just reload the clean memory
         self.mapdl.resume('base_state') # Resume Clean State (No loads, Time=0)
-
-        # Go to solution processor for the next step
-        self.mapdl.run('/SOLU')
         
         return np.array([0.0], dtype=np.float32), {}
 
@@ -276,6 +273,14 @@ class AnsysSoftActuatorEnv(gym.Env):
 
     def check_material_properties(self, mat_id):
         """Helper to print what ANSYS sees for the material"""
+        # Check if the size of the model is in Meters or Millimeters.
+        self.mapdl.allsel()
+        xmin = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
+        xmax = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
+        model_len = xmax - xmin
+        print(f"\n--- CONFIGURING UNITS & MATERIAL ---")
+        print(f"Detected Model Length: {model_len:.4f}")
+        # Verify materials are correct (Hyperelastic for soft robots)
         print(f"--- VERIFYING MATERIAL {mat_id} ---")
         # Check Hyperelastic Table
         output = self.mapdl.run(f"TBLIST, ALL, {mat_id}")
