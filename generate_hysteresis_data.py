@@ -62,12 +62,19 @@ def generate_data_final():
     np.random.seed(42 + current_episode_idx) 
     
     for i in range(random_len):
-        if np.random.rand() < 0.05: pass 
-        elif np.random.rand() < 0.2:     
-            random_signal[i] = offset + amplitude * np.sin(i * 0.2)
+
+        rand_val = np.random.rand()
+        # Assign the current pressure (Hold)  
+        if rand_val < 0.05:   
+            random_signal[i] = current_p 
+        # Sine wave segment (Small oscillations)
+        elif rand_val < 0.2:     
+            random_signal[i] = current_p + 2000 * np.sin(i * 0.5)
+            # Update current_p so the walk continues from here
             current_p = random_signal[i]
-        else:                            
-            change = np.random.uniform(-15000, 15000)
+        # Random Walk
+        else:                             
+            change = np.random.uniform(-10000, 10000) # Reduced to 10k for smoothness
             current_p = np.clip(current_p + change, MIN_PRESSURE, MAX_PRESSURE)
             random_signal[i] = current_p
     
