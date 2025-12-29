@@ -12,9 +12,8 @@ def sweep_pressure():
         log_level="ERROR"
     )
     
-    # Define range: 0 kPa to 150 kPa in 10 kPa steps
-    MIN_PRESSURE_KPA = 0
-    MAX_PRESSURE_KPA = 150
+    MIN_PRESSURE_KPA = env.min_pressure / 1000.0
+    MAX_PRESSURE_KPA = env.max_pressure / 1000.0
     INCREMENT_KPA = 10
     num_steps = int((MAX_PRESSURE_KPA - MIN_PRESSURE_KPA) / INCREMENT_KPA) + 1
     pressures_kpa = np.linspace(MIN_PRESSURE_KPA, MAX_PRESSURE_KPA, num_steps)
