@@ -58,18 +58,19 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Upload the file to the solver's working directory
         self.mapdl.upload(self.dat_path)
         self.mapdl.clear()
-        self.mapdl.prep7() # Enter Pre-processor
-        self.mapdl.run('SHPP, OFF') # Disable shape checking errors
-        self.mapdl.run('/NERR, 0, -1') # Suppress error dialogs
+        self.mapdl.prep7(mute=True) # Enter Pre-processor
+        self.mapdl.run('SHPP, OFF', mute=True) # Disable shape checking errors
+        self.mapdl.run('/NERR, 0, -1', mute=True) # Suppress error dialogs
         self.mapdl.input(self.dat_path) # Read the file
-        self.mapdl.prep7() # Re-enter preprocessor again as dat file ends with FINISH
-        self.mapdl.allsel() # Ensure you can see/edit the whole model
 
+        # INITIAL SETUP
+        self.mapdl.prep7(mute=True) # Re-enter preprocessor again as dat file ends with FINISH
+        self.mapdl.allsel(mute=True) # Ensure you can see/edit the whole model
         # FIX for INCREASE ERROR LIMIT (The number of ERROR and WARNING messages exceeds 10000)
         # Allow up to 10 million warnings (effectively infinite)
         self.mapdl.run('/NERR, 10000000, 10000000, -1') # '-1' means "Do not abort"
         # Disable the "Element/Node" integrity check warning printing
-        self.mapdl.run('/NOLIST')
+        self.mapdl.run('/NOLIST', mute=True)
 
         # ======================================================================
         # SIZE and MATERIAL CHECK ----------------------------------------------
@@ -120,20 +121,18 @@ class AnsysSoftActuatorEnv(gym.Env):
         norm_action = (raw_action + 1.0) / 2.0
         pressure_val = self.min_pressure + (pressure_range * norm_action)
         
-        self.mapdl.prep7()
+        # --- ENTER SOLUTION PROCESSOR ---
+        # NO PREP7 CALL HERE!
+        self.mapdl.run('/SOLU')
 
         # APPLY PRESSURE LOAD --------------------------------------------------
-        # Select the faces for pressure (Named Selection 'Inner1new')
-        #self.mapdl.cmsel('S', 'Inner1new')
-        # Select ALL elements attached to these nodes (Solids + Surfs)
-        #self.mapdl.esln('S')
-        # Filter out Surface Effect elements (154) so we don't double load
-        #self.mapdl.esel('R', 'ENAME', '', 154)
+        
+        #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
+        #self.mapdl.esln('S') # Select ALL elements attached to these nodes (Solids + Surfs)
+        #self.mapdl.esel('R', 'ENAME', '', 154) # Filter out Surface Effect elements (154) to not double load
         # Apply Pressure to the remaining (Solid) elements
-        # Since the Surfs are hidden, the pressure only applies once.
-        #self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
-        # Select everything again for solving
-        #self.mapdl.allsel()
+        #self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val) # Since the Surfs are hidden, the pressure only applies once.
+        #self.mapdl.allsel() # Select everything again for solving
 
         # --- OPTIMIZED LOAD APPLICATION ---
         # Replaced 3 selection commands with 1 component selection
@@ -143,27 +142,20 @@ class AnsysSoftActuatorEnv(gym.Env):
         ### ===================================================================
 
         # RUN SOLVER -----------------------------------------------------------
-        self.mapdl.run('/SOLU')
         self.mapdl.antype('STATIC') # Ensure Static Analysis
         # For hysteresis effect
-        self.mapdl.timint('OFF') # Enables Hysteresis/Viscoelasticity in Static Mode
+        self.mapdl.timint('ON') # Enables Hysteresis/Viscoelasticity in Static Mode
         self.mapdl.time(self.sim_time) # <--- TELL ANSYS WHAT TIME IT IS
         self.mapdl.lnsrch('ON') # Line Search prevents divergence at 120kPa
-        self.mapdl.pred('ON') # Predictor helps follow the curve
+        self.mapdl.pred('OFF') # Predictor helps follow the curve
         self.mapdl.nsubst(2, 5000, 2) # Start with 5 steps. If unstable, add steps.
         self.mapdl.neqit(25) # Allow more attempts (default is 15, too low for rubber)
-        # ======================================================================
-
-        # CRITICAL: Re-enforce Large Deflection & Substepping every step
         # This prevents the "Explosion" where deformation jumps to 900 meters.
-        self.mapdl.nlgeom('ON') # Nonlinear Geometry
+        self.mapdl.nlgeom('ON') # Nonlinear Geometry (Re-enforce Large Deflection) 
         # FASTER SOLVER
         #self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
-        self.mapdl.run('SOLCONTROL, ON')  # Activates optimized nonlinear defaults
-
-        # SOLVE (RAMP) ---------------------------------------------------------
+        #self.mapdl.run('SOLCONTROL, ON')  # Activates optimized nonlinear defaults
         self.mapdl.kbc(0) # ensure RAMPED loading 
-        # Max 100 steps if it struggles, min 5 steps if stable enough.
         #self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
         #self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
 
@@ -172,10 +164,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         # self.mapdl.outres('ALL', 'LAST')
         # --- THE ULTRA-FAST SETTING ---
         self.mapdl.outres('ERASE') # Clear previous output settings
-        # Write ONLY Nodal Solution (NSOL) -> Displacement
-        # We skip stresses (RSOL), strains (ESOL), etc.
-        self.mapdl.outres('NSOL', 'LAST') # write ONLY the last substep ('LAST')
-        # In Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) later,
+        # Write ONLY Nodal Solution (NSOL) -> Displacement, skip stresses (RSOL), strains (ESOL), etc.
+        self.mapdl.outres('NSOL', 'LAST') # write only Nodal Solution (last substep)
+        # In Ultra-Fast setting, we cannot plot Stress or Strain (Von Mises) later,
         # because that data is not saved but Displacement (plot_nodal_displacement) works
         
         # Select everything again for solving
@@ -237,8 +228,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.finish()
         # Instead of solving physics, just reload the clean memory
         self.mapdl.resume('base_state') # Resume Clean State (No loads, Time=0)
-
-        self.mapdl.run('/SOLU')
         
         return np.array([0.0], dtype=np.float32), {}
 
