@@ -25,7 +25,6 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         self.actuation_axis = "X" # Axis along which deformation is measured
         self.current_step_count = 0   # Track steps for "done" logic
-        self.last_pressure = 0.0
         
         # TIME MANAGEMENT (The missing link for Hysteresis)
         self.sim_time = 0.0
@@ -59,59 +58,51 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Upload the file to the solver's working directory
         self.mapdl.upload(self.dat_path)
         self.mapdl.clear()
-        self.mapdl.prep7() # Enter Pre-processor
-        self.mapdl.run('SHPP, OFF') # Disable shape checking errors
-        self.mapdl.run('/NERR, 0, -1') # Suppress error dialogs
-        
-        # Read the file
-        self.mapdl.input(self.dat_path)
-        
-        # Re-enter preprocessor again as dat file ends with FINISH
-        self.mapdl.prep7()
-        self.mapdl.allsel() # Ensure you can see/edit the whole model
+        self.mapdl.prep7(mute=True) # Enter Pre-processor
+        self.mapdl.run('SHPP, OFF', mute=True) # Disable shape checking errors
+        self.mapdl.run('/NERR, 0, -1', mute=True) # Suppress error dialogs
+        self.mapdl.input(self.dat_path) # Read the file
 
+        # INITIAL SETUP
+        self.mapdl.prep7(mute=True) # Re-enter preprocessor again as dat file ends with FINISH
+        self.mapdl.allsel(mute=True) # Ensure you can see/edit the whole model
         # FIX for INCREASE ERROR LIMIT (The number of ERROR and WARNING messages exceeds 10000)
         # Allow up to 10 million warnings (effectively infinite)
         self.mapdl.run('/NERR, 10000000, 10000000, -1') # '-1' means "Do not abort"
         # Disable the "Element/Node" integrity check warning printing
-        self.mapdl.run('/NOLIST')
+        self.mapdl.run('/NOLIST', mute=True)
 
+        # ======================================================================
         # SIZE and MATERIAL CHECK ----------------------------------------------
-        CHECK_MATERIAL = False
-        if CHECK_MATERIAL:
-            self.check_material_properties(1)
+        self.check_material_properties(1)
+        # CHECK SELF CONTACT
+        self.check_contact_status()
+        # ======================================================================
         
-        # Ensure the FixedSupport is fixed
+        # Ensure Fixed Support
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.d('ALL', 'ALL', 0)
 
-        # Check if self contact is active
-        CHECK_SELF_CONTACT = False
-        if CHECK_SELF_CONTACT:
-            self.check_contact_status()
-
-        # Check Node Count
-        node_count = self.mapdl.mesh.n_node
-        print(f"Model Loaded. Node Count: {node_count}")
-        if node_count > 128000:
-            print("WARNING: Node count exceeds Student License limit (128k). Solver might crash.")
+        # --- OPTIMIZATION B: PRE-CALCULATE PRESSURE COMPONENT ---
+        # Do the selection logic once and save it as a Component
+        self.mapdl.cmsel('S', 'Inner1new')
+        self.mapdl.esln('S')
+        self.mapdl.esel('R', 'ENAME', '', 154) 
+        self.mapdl.cm('PRESSURE_ELEMS', 'ELEM') # Save as component
+        self.mapdl.allsel(mute=True)
 
         # SAVE THE CLEAN STATE
         self.mapdl.save('base_state') # Saves base_state.db
-
         self.mapdl.finish()
 
         # ACTION SPACE
-        # The agent will output values between -1 and 1. Scale to 0-Max Pressure later
         self.action_space = spaces.Box(
             low=np.array([-1.0]), #low=np.array([0.0]), 
             high=np.array([1.0]), #high=np.array([self.max_pressure]),
             shape=(1,), # we control 1 variable (Pressure)
             dtype=np.float32
         )
-
-        # OBSERVATION SPACE
-        # Observation: Current Deformation in X
+        # OBSERVATION SPACE: Current Deformation in X
         self.observation_space = spaces.Box(
             low=np.array([-0.3]), # assuming max -0.3 m deformation
             high=np.array([0.3]), # assuming max +0.3 m deformation
@@ -121,8 +112,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         
     def step(self, action):
         self.current_step_count += 1
-        # Advance Time (Critical for Hysteresis)
-        self.sim_time += self.dt
+        self.sim_time += self.dt # Advance time (Critical for Hysteresis)
 
         # Unpack Action and clip it to ensure it stays within bounds
         raw_action = np.clip(action[0], -1.0, 1.0)
@@ -131,65 +121,53 @@ class AnsysSoftActuatorEnv(gym.Env):
         norm_action = (raw_action + 1.0) / 2.0
         pressure_val = self.min_pressure + (pressure_range * norm_action)
         
-        # --- HYBRID STEPPING LOGIC ---
-        # 1. Calculate the magnitude of the jump
-        delta_p = abs(pressure_val - self.last_pressure)
-        self.last_pressure = pressure_val # Update tracker
+        # --- ENTER SOLUTION PROCESSOR ---
+        # NO PREP7 CALL HERE!
+        self.mapdl.run('/SOLU')
+
+        # APPLY PRESSURE LOAD --------------------------------------------------
         
-        self.mapdl.run('/SOLU', mute=True)
-        self.mapdl.antype('STATIC') 
-        self.mapdl.timint('ON')
-        self.mapdl.time(self.sim_time)
-        self.mapdl.nlgeom('ON')
-        self.mapdl.lnsrch('ON')    
-        self.mapdl.kbc(0) # Ramped loading
+        #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
+        #self.mapdl.esln('S') # Select ALL elements attached to these nodes (Solids + Surfs)
+        #self.mapdl.esel('R', 'ENAME', '', 154) # Filter out Surface Effect elements (154) to not double load
+        # Apply Pressure to the remaining (Solid) elements
+        #self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val) # Since the Surfs are hidden, the pressure only applies once.
+        #self.mapdl.allsel() # Select everything again for solving
 
-        # === CRUISING MODE (FAST) === 
-        if delta_p <= 10000: # THRESHOLD: 10 kPa.
-            self.mapdl.pred('ON')      
-            self.mapdl.nropt('AUTO')   
-            self.mapdl.nsubst(1, 5, 1)
-        # === COMBAT MODE (OPTIMIZED) ===
-        else:
-            self.mapdl.pred('OFF')     
-            self.mapdl.nropt('FULL')   
-            
-            # SPEED OPTIMIZATION:
-            # Example: 100k jump -> 12 steps (instead of 20). 
-            safe_increment = 8000.0 # 5000 for more conservative
-            
-            n_start = int(delta_p / safe_increment)
-            n_start = np.clip(n_start, 5, 50) 
-            self.mapdl.nsubst(n_start, 10000, 5)
+        # --- OPTIMIZED LOAD APPLICATION ---
+        # Replaced 3 selection commands with 1 component selection
+        self.mapdl.cmsel('S', 'PRESSURE_ELEMS') # PRESSURE_ELEMS
+        self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
+        self.mapdl.allsel()
+        ### ===================================================================
 
-        self.mapdl.outres('ERASE')
-        self.mapdl.outres('NSOL', 'LAST')
+        # RUN SOLVER -----------------------------------------------------------
+        self.mapdl.antype('STATIC') # Ensure Static Analysis
+        # For hysteresis effect
+        self.mapdl.timint('ON') # Enables Hysteresis/Viscoelasticity in Static Mode
+        self.mapdl.time(self.sim_time) # <--- TELL ANSYS WHAT TIME IT IS
+        self.mapdl.lnsrch('ON') # Line Search prevents divergence at 120kPa
+        self.mapdl.pred('OFF') # Predictor helps follow the curve
+        self.mapdl.nsubst(2, 5000, 2) # Start with 5 steps. If unstable, add steps.
+        self.mapdl.neqit(25) # Allow more attempts (default is 15, too low for rubber)
+        # This prevents the "Explosion" where deformation jumps to 900 meters.
+        self.mapdl.nlgeom('ON') # Nonlinear Geometry (Re-enforce Large Deflection) 
+        # FASTER SOLVER
+        #self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
+        #self.mapdl.run('SOLCONTROL, ON')  # Activates optimized nonlinear defaults
+        self.mapdl.kbc(0) # ensure RAMPED loading 
+        #self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
+        #self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
 
         # REDUCE FILE IO (for RL speed) -------------------------
         # Only write the LAST substep to the file (prevents disk bloat)
-        ULTRA_FAST = True
-        if not ULTRA_FAST:
-            self.mapdl.outres('ALL', 'LAST')
-        else:
-            # --- THE ULTRA-FAST SETTING ---
-            self.mapdl.outres('ERASE') # Clear previous output settings
-            # Write ONLY Nodal Solution (NSOL) -> Displacement
-            # We skip stresses (RSOL), strains (ESOL), etc.
-            self.mapdl.outres('NSOL', 'LAST') # write ONLY the last substep ('LAST')
-            # In Ultra-Fast setting, you cannot plot Stress or Strain (Von Mises) later,
-            # because that data is not saved but Displacement (plot_nodal_displacement) works
-        
-        # APPLY PRESSURE LOAD --------------------------------------------------
-        # Select the faces for pressure (Named Selection 'Inner1new')
-        self.mapdl.cmsel('S', 'Inner1new')
-        # Select ALL elements attached to these nodes (Solids + Surfs)
-        self.mapdl.esln('S')
-        # Filter out Surface Effect elements (154) so we don't double load
-        self.mapdl.esel('R', 'ENAME', '', 154)
-
-        # Apply Pressure to the remaining (Solid) elements
-        # Since the Surfs are hidden, the pressure only applies once.
-        self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
+        # self.mapdl.outres('ALL', 'LAST')
+        # --- THE ULTRA-FAST SETTING ---
+        self.mapdl.outres('ERASE') # Clear previous output settings
+        # Write ONLY Nodal Solution (NSOL) -> Displacement, skip stresses (RSOL), strains (ESOL), etc.
+        self.mapdl.outres('NSOL', 'LAST') # write only Nodal Solution (last substep)
+        # In Ultra-Fast setting, we cannot plot Stress or Strain (Von Mises) later,
+        # because that data is not saved but Displacement (plot_nodal_displacement) works
         
         # Select everything again for solving
         self.mapdl.allsel()
@@ -246,7 +224,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         super().reset(seed=seed)
         self.current_step_count = 0
         self.sim_time = 0.0 
-        self.last_pressure = 0.0  # Reset Pressure Tracker
 
         self.mapdl.finish()
         # Instead of solving physics, just reload the clean memory
@@ -273,6 +250,13 @@ class AnsysSoftActuatorEnv(gym.Env):
 
     def check_material_properties(self, mat_id):
         """Helper to print what ANSYS sees for the material"""
+        # Check Node Count
+        self.mapdl.allsel()
+        node_count = self.mapdl.mesh.n_node
+        print(f"Model Loaded. Node Count: {node_count}")
+        if node_count > 128000:
+            print("WARNING: Node count exceeds Student License limit (128k). Solver might crash.")
+
         # Check if the size of the model is in Meters or Millimeters.
         self.mapdl.allsel()
         xmin = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
@@ -280,6 +264,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         model_len = xmax - xmin
         print(f"\n--- CONFIGURING UNITS & MATERIAL ---")
         print(f"Detected Model Length: {model_len:.4f}")
+        
         # Verify materials are correct (Hyperelastic for soft robots)
         print(f"--- VERIFYING MATERIAL {mat_id} ---")
         # Check Hyperelastic Table
