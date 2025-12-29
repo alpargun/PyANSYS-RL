@@ -55,8 +55,8 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # LOAD ANSYS MODEL -----------------------------------------------------
         print(f"Loading Model from {self.dat_path}...")
-        # Upload the file to the solver's working directory
-        self.mapdl.upload(self.dat_path)
+        self.mapdl.upload(self.dat_path) # Upload the file to the solver's working dir
+
         self.mapdl.clear()
         self.mapdl.prep7(mute=True) # Enter Pre-processor
         self.mapdl.run('SHPP, OFF', mute=True) # Disable shape checking errors
@@ -66,17 +66,16 @@ class AnsysSoftActuatorEnv(gym.Env):
         # INITIAL SETUP
         self.mapdl.prep7(mute=True) # Re-enter preprocessor again as dat file ends with FINISH
         self.mapdl.allsel(mute=True) # Ensure you can see/edit the whole model
-        # FIX for INCREASE ERROR LIMIT (The number of ERROR and WARNING messages exceeds 10000)
+        # FIX for INCREASE ERROR LIMIT (Num ERROR and WARNING messages exceeds 10000)
         # Allow up to 10 million warnings (effectively infinite)
         self.mapdl.run('/NERR, 10000000, 10000000, -1') # '-1' means "Do not abort"
-        # Disable the "Element/Node" integrity check warning printing
-        self.mapdl.run('/NOLIST', mute=True)
+        self.mapdl.run('/NOLIST', mute=True) # Disable "Element/Node" integrity check warning
 
         # ======================================================================
         # SIZE and MATERIAL CHECK ----------------------------------------------
-        self.check_material_properties(1)
+        #self.check_material_properties(1)
         # CHECK SELF CONTACT
-        self.check_contact_status()
+        #self.check_contact_status()
         # ======================================================================
         
         # Ensure Fixed Support
@@ -126,7 +125,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.run('/SOLU')
 
         # APPLY PRESSURE LOAD --------------------------------------------------
-        
         #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
         #self.mapdl.esln('S') # Select ALL elements attached to these nodes (Solids + Surfs)
         #self.mapdl.esel('R', 'ENAME', '', 154) # Filter out Surface Effect elements (154) to not double load
@@ -138,45 +136,12 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Replaced 3 selection commands with 1 component selection
         self.mapdl.cmsel('S', 'PRESSURE_ELEMS') # PRESSURE_ELEMS
         self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
-        self.mapdl.allsel()
-        ### ===================================================================
-
-        # RUN SOLVER -----------------------------------------------------------
-        self.mapdl.antype('STATIC') # Ensure Static Analysis
-        # For hysteresis effect
-        self.mapdl.timint('ON') # Enables Hysteresis/Viscoelasticity in Static Mode
-        self.mapdl.time(self.sim_time) # <--- TELL ANSYS WHAT TIME IT IS
-        self.mapdl.lnsrch('ON') # Line Search prevents divergence at 120kPa
-        self.mapdl.pred('OFF') # Predictor helps follow the curve
-        self.mapdl.nsubst(2, 5000, 2) # Start with 5 steps. If unstable, add steps.
-        self.mapdl.neqit(25) # Allow more attempts (default is 15, too low for rubber)
-        # This prevents the "Explosion" where deformation jumps to 900 meters.
-        self.mapdl.nlgeom('ON') # Nonlinear Geometry (Re-enforce Large Deflection) 
-        # FASTER SOLVER
-        #self.mapdl.eqslv('SPARSE') # Sparse is usually best for nonlinear rubber models < 100k nodes
-        #self.mapdl.run('SOLCONTROL, ON')  # Activates optimized nonlinear defaults
-        self.mapdl.kbc(0) # ensure RAMPED loading 
-        #self.mapdl.nsubst(5, 100, 5) # self.mapdl.nsubst(100, 1000, 50)
-        #self.mapdl.neqit(25) # If can't solve in N iters, cut the step size rather than grinding.
-
-        # REDUCE FILE IO (for RL speed) -------------------------
-        # Only write the LAST substep to the file (prevents disk bloat)
-        # self.mapdl.outres('ALL', 'LAST')
-        # --- THE ULTRA-FAST SETTING ---
-        self.mapdl.outres('ERASE') # Clear previous output settings
-        # Write ONLY Nodal Solution (NSOL) -> Displacement, skip stresses (RSOL), strains (ESOL), etc.
-        self.mapdl.outres('NSOL', 'LAST') # write only Nodal Solution (last substep)
-        # In Ultra-Fast setting, we cannot plot Stress or Strain (Von Mises) later,
-        # because that data is not saved but Displacement (plot_nodal_displacement) works
+        self.mapdl.allsel() # Select everything again for solving
         
-        # Select everything again for solving
-        self.mapdl.allsel()
         self.mapdl.solve()
-        self.mapdl.finish()
         
         # CHECK FOR SOLVER CONVERGENCE -----------------------------------------
-        # If ANSYS failed to solve (diverged), the results are garbage.
-        if not self.mapdl.solution.converged:
+        if not self.mapdl.solution.converged: # If diverged, garbage results
             print(f"DEBUG: Solver Diverged at {pressure_val:.0f} Pa")
             # Return current state as 0, Penalty -50, End Episode
             return np.array([0.0], dtype=np.float32), -50.0, True, False, {"pressure": pressure_val}
@@ -186,14 +151,13 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.post1()
         self.mapdl.set('LAST') # Read the final converged substep
         self.mapdl.allsel()
+        
         # Calculate max deformation across all nodes
         self.mapdl.nsort('U', self.actuation_axis) # Sort nodes by deformation
-        
         # Measure Extension Relative to Base (Tip - Base)
         # Get Tip (Min Displacement - assuming extension in -X)
         tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')        
         # Get Base (Max Displacement 0)
-        #self.mapdl.nsel('S', 'LOC', 'X', -0.001, 0.001) # Check for sliding
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.nsort('U', self.actuation_axis)
         base_disp = self.mapdl.get_value('SORT', 0, 'MAX')
@@ -228,6 +192,26 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.finish()
         # Instead of solving physics, just reload the clean memory
         self.mapdl.resume('base_state') # Resume Clean State (No loads, Time=0)
+
+        # --- OPTIMIZATION: CONFIGURE SOLVER ONCE PER EPISODE ---
+        self.mapdl.run('/SOLU')
+        
+        self.mapdl.antype('STATIC') 
+        self.mapdl.timint('ON')  # Hysteresis ON
+        self.mapdl.lnsrch('ON')  # Line Search ON
+        self.mapdl.pred('OFF')   # Predictor OFF (Stable)
+        self.mapdl.nlgeom('ON') 
+        self.mapdl.kbc(0)
+
+        self.mapdl.eqslv('SPARSE') 
+        self.mapdl.nsubst(1, 5000, 1) # self.mapdl.nsubst(2, 5000, 2) 
+        self.mapdl.neqit(25)
+
+        # I/O Settings
+        self.mapdl.outres('ERASE') 
+        self.mapdl.outres('NSOL', 'LAST')
+        
+        self.mapdl.finish()
         
         return np.array([0.0], dtype=np.float32), {}
 
