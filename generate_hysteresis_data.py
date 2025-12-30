@@ -7,7 +7,7 @@ from ansys_rl_env import AnsysSoftActuatorEnv
 
 def generate_data_final():
     # --- CONFIG ---
-    dat_path = "actuator_setup_150kPa.dat"
+    dat_path = "actuator_setup_viscoelasticity_1Pa.dat"
     output_file = "hysteresis_data_final.csv"
     
     # We want ~3000 steps per "Session"

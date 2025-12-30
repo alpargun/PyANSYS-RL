@@ -1,8 +1,9 @@
+from datetime import datetime
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import os
-from datetime import datetime
+import time
 
 from ansys.mapdl.core import launch_mapdl
 
@@ -12,16 +13,16 @@ class AnsysSoftActuatorEnv(gym.Env):
     Connects to ANSYS MAPDL to control a soft pneumatic actuator.
     """
     
-    def __init__(self, dat_path, target_deformation=0.05, log_level="INFO"):
+    def __init__(self, dat_path, target_deformation=0.05, min_presure=0.0, max_pressure=120000.0, log_level="INFO"):
         super(AnsysSoftActuatorEnv, self).__init__()
         
         # CONFIGURATION
         self.dat_path = dat_path # .dat file for the solution from ANSYS Mechanical
         self.target_deformation = target_deformation # Target elongation (meters)
 
-        # Pressure Range (Vacuum to Expansion)
-        self.min_pressure = 0.0 
-        self.max_pressure = 120000.0 # Max pressure in Pascals
+        # Pressure Range in Pascals (Vacuum to Expansion)
+        self.min_pressure = min_presure 
+        self.max_pressure = max_pressure
 
         self.actuation_axis = "X" # Axis along which deformation is measured
         self.current_step_count = 0   # Track steps for "done" logic
@@ -82,8 +83,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.d('ALL', 'ALL', 0)
 
-        # --- OPTIMIZATION B: PRE-CALCULATE PRESSURE COMPONENT ---
-        # Do the selection logic once and save it as a Component
+        # Pre-calculate surface elements to apply pressure and save as a component
         self.mapdl.cmsel('S', 'Inner1new')
         self.mapdl.esln('S')
         self.mapdl.esel('R', 'ENAME', '', 154) 
@@ -147,22 +147,44 @@ class AnsysSoftActuatorEnv(gym.Env):
             return np.array([0.0], dtype=np.float32), -50.0, True, False, {"pressure": pressure_val}
 
         # GET OBSERVATION ------------------------------------------------------
-        # Get Observation (Deformation)
+        # # Get Observation (Deformation)
+        # self.mapdl.post1()
+        # self.mapdl.set('LAST') # Read the final converged substep
+        # self.mapdl.allsel()
+        
+        # # Calculate max deformation across all nodes
+        # self.mapdl.nsort('U', self.actuation_axis) # Sort nodes by deformation
+        # # Measure Extension Relative to Base (Tip - Base)
+        # # Get Tip (Min Displacement - assuming extension in -X)
+        # tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')
+        # # Get Base (Max Displacement 0)
+        # self.mapdl.cmsel('S', 'FixedSupport')
+        # self.mapdl.nsort('U', self.actuation_axis)
+        # base_disp = self.mapdl.get_value('SORT', 0, 'MAX')
+
+        # --- OBSERVATION (Optimized *GET) ---
         self.mapdl.post1()
-        self.mapdl.set('LAST') # Read the final converged substep
+        self.mapdl.set('LAST') 
+        
+        # 1. Select ALL nodes (Original Accuracy)
         self.mapdl.allsel()
         
-        # Calculate max deformation across all nodes
-        self.mapdl.nsort('U', self.actuation_axis) # Sort nodes by deformation
-        # Measure Extension Relative to Base (Tip - Base)
-        # Get Tip (Min Displacement - assuming extension in -X)
-        tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')        
-        # Get Base (Max Displacement 0)
+        # 2. Sort ALL nodes by X deformation
+        self.mapdl.nsort('U', self.actuation_axis) 
+        
+        # 3. Get Tip Value (Min X) using *GET (Fast)
+        # This replaces get_value('SORT', 0, 'MIN')
+        self.mapdl.run('*GET, TIP_VAL, SORT, 0, MIN') 
+        
+        # 4. Get Base Value (Max X)
         self.mapdl.cmsel('S', 'FixedSupport')
         self.mapdl.nsort('U', self.actuation_axis)
-        base_disp = self.mapdl.get_value('SORT', 0, 'MAX')
+        self.mapdl.run('*GET, BASE_VAL, SORT, 0, MAX') 
+        
+        # 5. Read variables directly from memory
+        tip_disp = self.mapdl.parameters['TIP_VAL']
+        base_disp = self.mapdl.parameters['BASE_VAL']
 
-        # Calculate pure extension magnitude
         cur_deformation = abs(tip_disp - base_disp)
 
         # CALCULATE REWARD -----------------------------------------------------
@@ -203,8 +225,13 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.nlgeom('ON') 
         self.mapdl.kbc(0)
 
-        self.mapdl.eqslv('SPARSE') 
-        self.mapdl.nsubst(1, 5000, 1) # self.mapdl.nsubst(2, 5000, 2) 
+        self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
+        
+        # LOOSEN TOLERANCE
+        # 5% tolerance prevents the solver from getting stuck in bisection loops
+        self.mapdl.cnvtol('F', '', 0.05, 2) 
+
+        self.mapdl.nsubst(20, 5000, 5) # self.mapdl.nsubst(2, 5000, 2) 
         self.mapdl.neqit(25)
 
         # I/O Settings
@@ -294,20 +321,26 @@ class AnsysSoftActuatorEnv(gym.Env):
 # ==========================================
 if __name__ == "__main__":
     # PATH to exported .dat file for the solution
-    DAT_FILE = "actuator_setup_150kPa.dat"
+    DAT_FILE = "actuator_setup_viscoelasticity_1Pa.dat"
     
     # Create the environment
     # try/finally block to ensure ANSYS closes if code crashes
     env = None
     try:
         env = AnsysSoftActuatorEnv(
-            dat_path=DAT_FILE, 
+            dat_path=DAT_FILE,
+            #min_presure=0.0,
+            #max_pressure=150000.0,
             target_deformation=0.03, 
             log_level="INFO"
         )
         
         # Reset environment
+        print("Resetting environment...")
+        start_reset = time.time()
         obs, _ = env.reset()
+        end_reset = time.time()
+        print(f"Reset took: {end_reset - start_reset:.4f} seconds")
         print(f"Initial Observation: {obs}")
         
         # Run for n_steps with random actions
@@ -316,9 +349,17 @@ if __name__ == "__main__":
             # Sample a random pressure from action space
             random_action = [1.0] #env.action_space.sample()
             
+            print(f"\n--- Starting Step {i+1} ---")
+            start_time = time.time()
+
             # Step the environment
             obs, reward, done, truncated, info = env.step(random_action)
             
+            # END TIMER
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"Step {i+1} Calculation Time: {duration:.4f} seconds")
+
             print(f"Step {i+1}:")
             print(f"  Applied Pressure: {info['pressure_applied']:.2f} Pa")
             print(f"  Resulting Deform: {obs[0]*100:.6f} cm")
