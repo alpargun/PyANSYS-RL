@@ -74,7 +74,7 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # ======================================================================
         # SIZE and MATERIAL CHECK ----------------------------------------------
-        #self.check_material_properties(1)
+        self.check_material_properties(1)
         # CHECK SELF CONTACT
         #self.check_contact_status()
         # ======================================================================
@@ -229,8 +229,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # LOOSEN TOLERANCE
         # 5% tolerance prevents the solver from getting stuck in bisection loops
-        self.mapdl.cnvtol('F', '', 0.05, 2) 
+        #self.mapdl.cnvtol('F', '', 0.01, 2) 
 
+        #self.mapdl.autots('ON')
         self.mapdl.nsubst(20, 5000, 5) # self.mapdl.nsubst(2, 5000, 2) 
         self.mapdl.neqit(25)
 
@@ -261,6 +262,7 @@ class AnsysSoftActuatorEnv(gym.Env):
 
     def check_material_properties(self, mat_id):
         """Helper to print what ANSYS sees for the material"""
+        print("\nCHECKING MATERIAL PROPERTIES...")
         # Check Node Count
         self.mapdl.allsel()
         node_count = self.mapdl.mesh.n_node
@@ -268,7 +270,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         if node_count > 128000:
             print("WARNING: Node count exceeds Student License limit (128k). Solver might crash.")
 
-        # Check if the size of the model is in Meters or Millimeters.
+        # Check model length
         self.mapdl.allsel()
         xmin = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
         xmax = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
@@ -285,6 +287,18 @@ class AnsysSoftActuatorEnv(gym.Env):
             print(output) # Uncomment to see full table
         else:
             print(f"WARNING: Material {mat_id} looks like STEEL or Undefined.")
+
+        # Check for Viscoelasticity (Prony Series)
+        if "Prony" in output:
+            print("SUCCESS: Prony Series table found (Viscoelasticity active).")
+        else:
+            print("CRITICAL WARNING: No 'PRONY' table found! Viscoelasticity is missing.")
+            print("Without this, the material has no time-dependent behavior (hysteresis).")
+
+        # Check density
+        # *GET command: Get Density (DENS) for Material ID (mat_id)
+        density = self.mapdl.get_value("MAT", mat_id, "DENS")
+        print(f"Density: {density}")
 
     def check_contact_status(self):
         """Prints status of all contact pairs in the model."""
