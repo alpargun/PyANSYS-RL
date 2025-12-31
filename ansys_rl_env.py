@@ -92,6 +92,18 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.cm('PRESSURE_ELEMS', 'ELEM') # Save as component
         self.mapdl.allsel(mute=True)
 
+        # --- CACHING (Optimization 1) ---
+        print("Caching Tip Node ID...")
+        self.mapdl.allsel()
+        min_x = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
+        max_x = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
+        
+        # Grab Geometric Center Node (Robust for Flat Tips)
+        self.tip_node_id = self.mapdl.queries.node(min_x, 0.0, 0.0)
+        self.base_node_id = self.mapdl.queries.node(max_x, 0.0, 0.0)
+        
+        print(f"Cached Tip Node: {self.tip_node_id}")
+
         # SAVE THE CLEAN STATE
         self.mapdl.save('base_state') # Saves base_state.db
         self.mapdl.finish()
@@ -140,7 +152,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         # 15,000 Pa -> ~7 steps. (Compare to 100 steps before!)
         optimal_substeps = max(2, int(abs(real_delta) / 2000))
         
-        self.mapdl.nsubst(optimal_substeps, 1000, 2)
+        # CRITICAL CHANGE: Max Substeps capped at 50 (was 1000).
+        # This forces ANSYS to work efficiently instead of taking 140 tiny steps.
+        self.mapdl.nsubst(optimal_substeps, 50, 2)
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
@@ -166,7 +180,7 @@ class AnsysSoftActuatorEnv(gym.Env):
             return np.array([0.0], dtype=np.float32), -50.0, True, False, {"pressure": pressure_val}
 
         self.current_pressure = pressure_val
-        
+
         # GET OBSERVATION ------------------------------------------------------
         # # Get Observation (Deformation)
         # self.mapdl.post1()
@@ -188,23 +202,18 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.set('LAST') 
         
         # 1. Select ALL nodes (Original Accuracy)
-        self.mapdl.allsel()
+        #self.mapdl.allsel()
         
-        # 2. Sort ALL nodes by X deformation
-        self.mapdl.nsort('U', self.actuation_axis) 
-        
-        # 3. Get Tip Value (Min X) using *GET (Fast)
-        # This replaces get_value('SORT', 0, 'MIN')
-        self.mapdl.run('*GET, TIP_VAL, SORT, 0, MIN') 
-        
-        # 4. Get Base Value (Max X)
-        self.mapdl.cmsel('S', 'FixedSupport')
-        self.mapdl.nsort('U', self.actuation_axis)
-        self.mapdl.run('*GET, BASE_VAL, SORT, 0, MAX') 
-        
-        # 5. Read variables directly from memory
-        tip_disp = self.mapdl.parameters['TIP_VAL']
-        base_disp = self.mapdl.parameters['BASE_VAL']
+        # Direct Query (O(1))
+        tip_disp = self.mapdl.get_value("NODE", self.tip_node_id, "U", "X")
+        base_disp = self.mapdl.get_value("NODE", self.base_node_id, "U", "X")
+
+        # ACCURACY FIX: We sort all nodes to find the true Global Max (e.g. Corner)
+        # self.mapdl.nsort('U', self.actuation_axis) 
+        # self.mapdl.run('*GET, TIP_VAL, SORT, 0, MIN') 
+        # self.mapdl.run('*GET, BASE_VAL, SORT, 0, MAX')
+        # tip_disp = self.mapdl.parameters['TIP_VAL']
+        # base_disp = self.mapdl.parameters['BASE_VAL']
 
         cur_deformation = abs(tip_disp - base_disp)
 
@@ -251,13 +260,11 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # LOOSEN TOLERANCE
         # 5% tolerance prevents the solver from getting stuck in bisection loops
-        #self.mapdl.cnvtol('F', '', 0.01, 2) 
+        self.mapdl.cnvtol('F', '', 0.05, 2) # default is 1%
 
         # 3. HIGH SUBSTEPS (Mechanical Standard)
-        # Start with 50-100 steps. 
-        # This ensures the first load increment is tiny (1-2 kPa).
         self.mapdl.autots('ON')
-        self.mapdl.nsubst(20, 1000, 5)
+        self.mapdl.nsubst(10, 50, 2)
         #self.mapdl.nsubst(100, 5000, 20) # works for 120kPa 
         
         self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
