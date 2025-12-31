@@ -26,6 +26,8 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         self.actuation_axis = "X" # Axis along which deformation is measured
         self.current_step_count = 0   # Track steps for "done" logic
+        self.pressure_step_limit = 15000.0 # Max change allowed per step (Pa)
+        self.current_pressure = 0.0 # Track current state
         
         # TIME MANAGEMENT (The missing link for Hysteresis)
         self.sim_time = 0.0
@@ -118,11 +120,27 @@ class AnsysSoftActuatorEnv(gym.Env):
         # P = Min + (Max - Min) * ( (Action + 1) / 2 )
         pressure_range = self.max_pressure - self.min_pressure
         norm_action = (raw_action + 1.0) / 2.0
-        pressure_val = self.min_pressure + (pressure_range * norm_action)
+        target_pressure = self.min_pressure + (pressure_range * norm_action)
+        
+        # 2. APPLY LIMITER (The Speed Fix)
+        # Calculates the allowed change and updates self.current_pressure
+        delta = target_pressure - self.current_pressure
+        real_delta = np.clip(delta, -self.pressure_step_limit, self.pressure_step_limit)
+        
+        # We only ask ANSYS to solve for this smaller, safe step
+        pressure_val = self.current_pressure + real_delta
         
         # --- ENTER SOLUTION PROCESSOR ---
         # NO PREP7 CALL HERE!
         self.mapdl.run('/SOLU')
+
+        # 2. DYNAMIC SUBSTEPS (The Speed Fix)
+        # We calculate how many steps we *actually* need for this specific delta.
+        # Rule of thumb: 1 step per 2000 Pa is very safe.
+        # 15,000 Pa -> ~7 steps. (Compare to 100 steps before!)
+        optimal_substeps = max(2, int(abs(real_delta) / 2000))
+        
+        self.mapdl.nsubst(optimal_substeps, 1000, 2)
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
@@ -147,6 +165,8 @@ class AnsysSoftActuatorEnv(gym.Env):
             # Return current state as 0, Penalty -50, End Episode
             return np.array([0.0], dtype=np.float32), -50.0, True, False, {"pressure": pressure_val}
 
+        self.current_pressure = pressure_val
+        
         # GET OBSERVATION ------------------------------------------------------
         # # Get Observation (Deformation)
         # self.mapdl.post1()
@@ -216,7 +236,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Instead of solving physics, just reload the clean memory
         self.mapdl.resume('base_state') # Resume Clean State (No loads, Time=0)
 
-        # --- OPTIMIZATION: CONFIGURE SOLVER ONCE PER EPISODE ---
         self.mapdl.run('/SOLU')
         
         self.mapdl.antype('STATIC') 
@@ -228,8 +247,8 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.run('SOLCONTROL, ON') # Enable Optimized Nonlinear Defaults
         self.mapdl.kbc(0)
 
-        self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
-        
+        self.mapdl.neqit(50)
+
         # LOOSEN TOLERANCE
         # 5% tolerance prevents the solver from getting stuck in bisection loops
         #self.mapdl.cnvtol('F', '', 0.01, 2) 
@@ -238,9 +257,11 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Start with 50-100 steps. 
         # This ensures the first load increment is tiny (1-2 kPa).
         self.mapdl.autots('ON')
-        self.mapdl.nsubst(100, 5000, 20) # self.mapdl.nsubst(2, 5000, 2) 
-        self.mapdl.neqit(25)
-
+        self.mapdl.nsubst(20, 1000, 5)
+        #self.mapdl.nsubst(100, 5000, 20) # works for 120kPa 
+        
+        self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
+        
         # I/O Settings
         self.mapdl.outres('ERASE') 
         self.mapdl.outres('NSOL', 'LAST')
