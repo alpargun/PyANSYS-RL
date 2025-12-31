@@ -26,10 +26,12 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         self.actuation_axis = "X" # Axis along which deformation is measured
         self.current_step_count = 0   # Track steps for "done" logic
-        
+        self.current_pressure = 0.0
+        self.pressure_step_limit = 15000.0 # Max pressure change allowed per step
+
         # TIME MANAGEMENT (The missing link for Hysteresis)
         self.sim_time = 0.0
-        self.dt = 0.1  # 10 steps = 1 second of physics
+        self.dt = 0.05  # How many sim steps correspond to 1 second of physics (1/N)
 
         # Path to ANSYS Student Executable to make sure we use the license
         student_exe = r"C:\Program Files\ANSYS Inc\ANSYS Student\v252\ansys\bin\winx64\ansys252.exe"
@@ -118,11 +120,28 @@ class AnsysSoftActuatorEnv(gym.Env):
         # P = Min + (Max - Min) * ( (Action + 1) / 2 )
         pressure_range = self.max_pressure - self.min_pressure
         norm_action = (raw_action + 1.0) / 2.0
-        pressure_val = self.min_pressure + (pressure_range * norm_action)
+        target_pressure = self.min_pressure + (pressure_range * norm_action)
+
+        # 2. Limit the Jump (The "Fast Training" Fix)
+        # We allow the pressure to move towards the target, but clipped to 15,000 Pa max.
+        delta = target_pressure - self.current_pressure
+        real_delta = np.clip(delta, -self.pressure_step_limit, self.pressure_step_limit)
+        
+        # This is the pressure we will actually solve for this step
+        pressure_val = self.current_pressure + real_delta
         
         # --- ENTER SOLUTION PROCESSOR ---
         # NO PREP7 CALL HERE!
         self.mapdl.run('/SOLU')
+
+        # 3. Dynamic Substeps (The "Small Load" Fix)
+        # Calculate how many steps we truly need.
+        # Rule: 1 step per 3,000 Pa.
+        # If delta is 3,000 Pa -> 1 Step (3 seconds).
+        # If delta is 15,000 Pa -> 5 Steps (15 seconds).
+        optimal_substeps = max(1, int(abs(real_delta) / 3000))
+        
+        self.mapdl.nsubst(optimal_substeps, 1000, 1)
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
@@ -137,6 +156,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.cmsel('S', 'PRESSURE_ELEMS') # PRESSURE_ELEMS
         self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
         self.mapdl.allsel() # Select everything again for solving
+        self.mapdl.time(self.sim_time)
         
         self.mapdl.solve()
         
@@ -145,6 +165,9 @@ class AnsysSoftActuatorEnv(gym.Env):
             print(f"DEBUG: Solver Diverged at {pressure_val:.0f} Pa")
             # Return current state as 0, Penalty -50, End Episode
             return np.array([0.0], dtype=np.float32), -50.0, True, False, {"pressure": pressure_val}
+
+        # Update valid pressure
+        self.current_pressure = pressure_val
 
         # GET OBSERVATION ------------------------------------------------------
         # # Get Observation (Deformation)
@@ -218,22 +241,24 @@ class AnsysSoftActuatorEnv(gym.Env):
         # --- OPTIMIZATION: CONFIGURE SOLVER ONCE PER EPISODE ---
         self.mapdl.run('/SOLU')
         
-        self.mapdl.antype('STATIC') 
+        self.mapdl.antype('STATIC')
         self.mapdl.timint('ON')  # Hysteresis ON
-        self.mapdl.lnsrch('ON')  # Line Search ON
-        self.mapdl.pred('OFF')   # Predictor OFF (Stable)
+        self.mapdl.lnsrch('OFF')
+        self.mapdl.pred('ON') # Predictor OFF (Stable)
         self.mapdl.nlgeom('ON') 
         self.mapdl.kbc(0)
 
+        # Keep AUTOTS ON as a safety net
+        self.mapdl.autots('ON')
+
         self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
         
-        # LOOSEN TOLERANCE
-        # 5% tolerance prevents the solver from getting stuck in bisection loops
-        #self.mapdl.cnvtol('F', '', 0.01, 2) 
+        #self.mapdl.nsubst(20, 5000, 5) # self.mapdl.nsubst(2, 5000, 2) 
+        self.mapdl.neqit(50) # N tries to find the answer bisecting
 
-        #self.mapdl.autots('ON')
-        self.mapdl.nsubst(20, 5000, 5) # self.mapdl.nsubst(2, 5000, 2) 
-        self.mapdl.neqit(25)
+        # 4. Loosen Force Tolerance to 5%
+        # Soft robots don't need 0.1% accuracy. 5% is standard for speed.
+        self.mapdl.cnvtol('F', '', 0.05, 2)
 
         # I/O Settings
         self.mapdl.outres('ERASE') 
