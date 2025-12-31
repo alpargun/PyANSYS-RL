@@ -29,7 +29,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # TIME MANAGEMENT (The missing link for Hysteresis)
         self.sim_time = 0.0
-        self.dt = 0.1  # 10 steps = 1 second of physics
+        self.dt = 1  # How many sim steps corr. to 1 second of physics (1/N)
 
         # Path to ANSYS Student Executable to make sure we use the license
         student_exe = r"C:\Program Files\ANSYS Inc\ANSYS Student\v252\ansys\bin\winx64\ansys252.exe"
@@ -74,7 +74,7 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # ======================================================================
         # SIZE and MATERIAL CHECK ----------------------------------------------
-        self.check_material_properties(1)
+        #self.check_material_properties(1)
         # CHECK SELF CONTACT
         #self.check_contact_status()
         # ======================================================================
@@ -138,6 +138,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.sfe('ALL', 1, 'PRES', '', pressure_val)
         self.mapdl.allsel() # Select everything again for solving
         
+        self.mapdl.time(self.sim_time)
         self.mapdl.solve()
         
         # CHECK FOR SOLVER CONVERGENCE -----------------------------------------
@@ -221,8 +222,10 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.antype('STATIC') 
         self.mapdl.timint('ON')  # Hysteresis ON
         self.mapdl.lnsrch('ON')  # Line Search ON
-        self.mapdl.pred('OFF')   # Predictor OFF (Stable)
+        self.mapdl.pred('ON')
         self.mapdl.nlgeom('ON') 
+        
+        self.mapdl.run('SOLCONTROL, ON') # Enable Optimized Nonlinear Defaults
         self.mapdl.kbc(0)
 
         self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
@@ -231,8 +234,11 @@ class AnsysSoftActuatorEnv(gym.Env):
         # 5% tolerance prevents the solver from getting stuck in bisection loops
         #self.mapdl.cnvtol('F', '', 0.01, 2) 
 
-        #self.mapdl.autots('ON')
-        self.mapdl.nsubst(20, 5000, 5) # self.mapdl.nsubst(2, 5000, 2) 
+        # 3. HIGH SUBSTEPS (Mechanical Standard)
+        # Start with 50-100 steps. 
+        # This ensures the first load increment is tiny (1-2 kPa).
+        self.mapdl.autots('ON')
+        self.mapdl.nsubst(100, 5000, 20) # self.mapdl.nsubst(2, 5000, 2) 
         self.mapdl.neqit(25)
 
         # I/O Settings
