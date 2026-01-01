@@ -92,18 +92,26 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.mapdl.cm('PRESSURE_ELEMS', 'ELEM') # Save as component
         self.mapdl.allsel(mute=True)
 
-        # --- CACHING (Optimization 1) ---
-        print("Caching Tip Node ID...")
-        self.mapdl.allsel()
+        # --- ROBUST CENTROID TRACKING ---
+        print("\nLocating Tip Centroid Node...")        
+        # 1. Try to select the 'TIPSURFACE' component you made in Mechanical
+        # MAPDL components are case-insensitive, but usually uppercase.
+        self.mapdl.cmsel('S', 'TipSurface')
+        # 2. Get the exact X location of this surface
+        # We don't need to average all nodes. We just need the X plane.
         min_x = self.mapdl.get_value("NODE", 0, "MNLOC", "X")
-        max_x = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
         
-        # Grab Geometric Center Node (Robust for Flat Tips)
+        # 3. Find the node at (Min_X, 0, 0)
+        # This forces the selection of the GEOMETRIC CENTER, ignoring mesh asymmetry.
         self.tip_node_id = self.mapdl.queries.node(min_x, 0.0, 0.0)
-        self.base_node_id = self.mapdl.queries.node(max_x, 0.0, 0.0)
         
-        print(f"Cached Tip Node: {self.tip_node_id}")
+        # 4. Find Base Node (Standard)
+        self.mapdl.allsel()
+        max_x = self.mapdl.get_value("NODE", 0, "MXLOC", "X")
+        self.base_node_id = self.mapdl.queries.node(max_x, 0.0, 0.0)
 
+        print(f"Tracking Centroid Node: {self.tip_node_id} at ({min_x:.4f}, 0.0000, 0.0000)")
+        
         # SAVE THE CLEAN STATE
         self.mapdl.save('base_state') # Saves base_state.db
         self.mapdl.finish()
@@ -154,7 +162,9 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # CRITICAL CHANGE: Max Substeps capped at 50 (was 1000).
         # This forces ANSYS to work efficiently instead of taking 140 tiny steps.
-        self.mapdl.nsubst(optimal_substeps, 50, 2)
+        # 2. FORCE SPEED (The Fix)
+        # We calculate needed steps (15kPa / 2000 = 7.5 steps).
+        self.mapdl.nsubst(optimal_substeps, 15, 2)
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
@@ -207,7 +217,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         # Direct Query (O(1))
         tip_disp = self.mapdl.get_value("NODE", self.tip_node_id, "U", "X")
         base_disp = self.mapdl.get_value("NODE", self.base_node_id, "U", "X")
-
+        
         # ACCURACY FIX: We sort all nodes to find the true Global Max (e.g. Corner)
         # self.mapdl.nsort('U', self.actuation_axis) 
         # self.mapdl.run('*GET, TIP_VAL, SORT, 0, MIN') 
@@ -228,7 +238,12 @@ class AnsysSoftActuatorEnv(gym.Env):
         truncated = bool(self.current_step_count >= 100) # Force stop after 100 steps
 
         # Return info
-        info = {"pressure_applied": pressure_val, "max_deformation": cur_deformation}
+        info = {
+            "pressure_applied": self.current_pressure, 
+            "target_request": target_pressure,
+            "max_deformation": cur_deformation
+        }
+
         print(f"Step {self.current_step_count} | reward: {reward}, deformation(cm): {cur_deformation*100}, pressure: {pressure_val}")
         # Gymnasium requires observation, reward, terminated, truncated, info
         return np.array([cur_deformation], dtype=np.float32), reward, terminated, truncated, info
@@ -264,7 +279,7 @@ class AnsysSoftActuatorEnv(gym.Env):
 
         # 3. HIGH SUBSTEPS (Mechanical Standard)
         self.mapdl.autots('ON')
-        self.mapdl.nsubst(10, 50, 2)
+        self.mapdl.nsubst(10, 50, 2) # was self.mapdl.nsubst(10, 50, 2)
         #self.mapdl.nsubst(100, 5000, 20) # works for 120kPa 
         
         self.mapdl.eqslv('SPARSE') # (Fastest for <10k nodes)
