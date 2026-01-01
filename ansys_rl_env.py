@@ -13,7 +13,7 @@ class AnsysSoftActuatorEnv(gym.Env):
     Connects to ANSYS MAPDL to control a soft pneumatic actuator.
     """
     
-    def __init__(self, dat_path, target_deformation=0.05, min_presure=0.0, max_pressure=120000.0, log_level="INFO"):
+    def __init__(self, dat_path, target_deformation=0.05, min_presure=0.0, max_pressure=120000.0,  dt=1, log_level="INFO",):
         super(AnsysSoftActuatorEnv, self).__init__()
         
         # CONFIGURATION
@@ -31,7 +31,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         # TIME MANAGEMENT (The missing link for Hysteresis)
         self.sim_time = 0.0
-        self.dt = 1  # How many sim steps corr. to 1 second of physics (1/N)
+        self.dt = dt  # How many sim steps corr. to 1 second of physics (1/N)
 
         # Path to ANSYS Student Executable to make sure we use the license
         student_exe = r"C:\Program Files\ANSYS Inc\ANSYS Student\v252\ansys\bin\winx64\ansys252.exe"
@@ -154,17 +154,11 @@ class AnsysSoftActuatorEnv(gym.Env):
         # NO PREP7 CALL HERE!
         self.mapdl.run('/SOLU')
 
-        # 2. DYNAMIC SUBSTEPS (The Speed Fix)
-        # We calculate how many steps we *actually* need for this specific delta.
-        # Rule of thumb: 1 step per 2000 Pa is very safe.
-        # 15,000 Pa -> ~7 steps. (Compare to 100 steps before!)
-        optimal_substeps = max(2, int(abs(real_delta) / 2000))
+        # Calculate applied pressure (Max. 15 kPa increments)
+        delta = target_pressure - self.current_pressure
+        real_delta = np.clip(delta, -self.pressure_step_limit, self.pressure_step_limit)
+        pressure_val = self.current_pressure + real_delta
         
-        # CRITICAL CHANGE: Max Substeps capped at 50 (was 1000).
-        # This forces ANSYS to work efficiently instead of taking 140 tiny steps.
-        # 2. FORCE SPEED (The Fix)
-        # We calculate needed steps (15kPa / 2000 = 7.5 steps).
-        self.mapdl.nsubst(optimal_substeps, 15, 2)
 
         # APPLY PRESSURE LOAD --------------------------------------------------
         #self.mapdl.cmsel('S', 'Inner1new') # Select the faces for pressure
@@ -192,22 +186,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         self.current_pressure = pressure_val
 
         # GET OBSERVATION ------------------------------------------------------
-        # # Get Observation (Deformation)
-        # self.mapdl.post1()
-        # self.mapdl.set('LAST') # Read the final converged substep
-        # self.mapdl.allsel()
-        
-        # # Calculate max deformation across all nodes
-        # self.mapdl.nsort('U', self.actuation_axis) # Sort nodes by deformation
-        # # Measure Extension Relative to Base (Tip - Base)
-        # # Get Tip (Min Displacement - assuming extension in -X)
-        # tip_disp = self.mapdl.get_value('SORT', 0, 'MIN')
-        # # Get Base (Max Displacement 0)
-        # self.mapdl.cmsel('S', 'FixedSupport')
-        # self.mapdl.nsort('U', self.actuation_axis)
-        # base_disp = self.mapdl.get_value('SORT', 0, 'MAX')
-
-        # --- OBSERVATION (Optimized *GET) ---
         self.mapdl.post1()
         self.mapdl.set('LAST') 
         
@@ -218,13 +196,6 @@ class AnsysSoftActuatorEnv(gym.Env):
         tip_disp = self.mapdl.get_value("NODE", self.tip_node_id, "U", "X")
         base_disp = self.mapdl.get_value("NODE", self.base_node_id, "U", "X")
         
-        # ACCURACY FIX: We sort all nodes to find the true Global Max (e.g. Corner)
-        # self.mapdl.nsort('U', self.actuation_axis) 
-        # self.mapdl.run('*GET, TIP_VAL, SORT, 0, MIN') 
-        # self.mapdl.run('*GET, BASE_VAL, SORT, 0, MAX')
-        # tip_disp = self.mapdl.parameters['TIP_VAL']
-        # base_disp = self.mapdl.parameters['BASE_VAL']
-
         cur_deformation = abs(tip_disp - base_disp)
 
         # CALCULATE REWARD -----------------------------------------------------
@@ -264,7 +235,7 @@ class AnsysSoftActuatorEnv(gym.Env):
         
         self.mapdl.antype('STATIC') 
         self.mapdl.timint('ON')  # Hysteresis ON
-        self.mapdl.lnsrch('ON')  # Line Search ON
+        self.mapdl.lnsrch('OFF')  # checks every calculation twice for safety
         self.mapdl.pred('ON')
         self.mapdl.nlgeom('ON') 
         
@@ -394,7 +365,8 @@ if __name__ == "__main__":
             dat_path=DAT_FILE,
             #min_presure=0.0,
             #max_pressure=150000.0,
-            target_deformation=0.03, 
+            target_deformation=0.03,
+            dt=0.005,
             log_level="INFO"
         )
         
