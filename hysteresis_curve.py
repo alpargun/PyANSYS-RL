@@ -6,7 +6,7 @@ def sweep_pressure():
     # Initialize environment
     TARGET_DEFORMATION = 0.05 # 5 cm
     env = AnsysSoftActuatorEnv(
-        dat_path=r"actuator_setup_viscoelasticity_1Pa.dat", 
+        dat_path=r"actuator_setup_viscoelasticity_1Pa_slowTerm.dat", 
         target_deformation=TARGET_DEFORMATION,
         dt=0.1,
         log_level="ERROR"
