@@ -7,8 +7,8 @@ from ansys_rl_env import AnsysSoftActuatorEnv
 
 def generate_data_final():
     # --- CONFIG ---
-    dat_path = "actuator_setup_viscoelasticity_1Pa.dat"
-    output_file = "hysteresis_data_final.csv"
+    dat_path = "actuator_setup_viscoelasticity_1Pa_slowTerm.dat"
+    output_file = "hysteresis_data_viscositySlowTerm.csv"
     
     # We want ~3000 steps per "Session"
     STEPS_PER_SESSION = 3000 
@@ -36,7 +36,7 @@ def generate_data_final():
         print("Created new data file.")
 
     # --- INITIALIZE ENV ---
-    env = AnsysSoftActuatorEnv(dat_path=dat_path, target_deformation=0.01, log_level="ERROR")
+    env = AnsysSoftActuatorEnv(dat_path=dat_path, target_deformation=0.01, dt=0.1, log_level="ERROR")
     obs, _ = env.reset()
     
     # Use bounds from Env to ensure consistency

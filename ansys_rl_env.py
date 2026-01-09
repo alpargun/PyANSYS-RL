@@ -13,7 +13,7 @@ class AnsysSoftActuatorEnv(gym.Env):
     Connects to ANSYS MAPDL to control a soft pneumatic actuator.
     """
     
-    def __init__(self, dat_path, target_deformation=0.05, min_presure=0.0, max_pressure=120000.0,  dt=1, log_level="INFO",):
+    def __init__(self, dat_path, target_deformation=0.05, min_presure=0.0, max_pressure=120000.0,  dt=0.1, log_level="INFO",):
         super(AnsysSoftActuatorEnv, self).__init__()
         
         # CONFIGURATION
